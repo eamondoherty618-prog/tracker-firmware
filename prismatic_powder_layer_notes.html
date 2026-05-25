@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Powder Layer & Cure Notes</title>
+  <style>
+    :root {
+      --bg: #fff;
+      --ink: #000;
+      --muted: #333;
+      --grid: #000;
+      --shade: #e9e9e9;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #fff;
+      color: var(--ink);
+      font-family: "Avenir Next", "Helvetica Neue", Arial, sans-serif;
+    }
+    .sheet {
+      width: 11in;
+      min-height: 8.5in;
+      margin: 0 auto;
+      padding: .28in;
+      background: #fff;
+    }
+    h1 {
+      margin: 0 0 4px;
+      font-size: 26px;
+      line-height: 1;
+      letter-spacing: -.02em;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+      margin-bottom: 12px;
+      font-size: 11px;
+    }
+    th, td {
+      border: 1.5px solid var(--grid);
+      padding: 6px 6px;
+      text-align: center;
+      vertical-align: middle;
+    }
+    th {
+      background: var(--shade);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+    td.kind {
+      text-align: left;
+      font-weight: 700;
+    }
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .box {
+      border: 1.5px solid #000;
+      padding: 8px 10px;
+      font-size: 11px;
+      line-height: 1.35;
+    }
+    .box strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 12px;
+    }
+    ul {
+      margin: 6px 0 0 16px;
+      padding: 0;
+    }
+    @media print {
+      .sheet {
+        width: auto;
+        min-height: auto;
+        margin: 0;
+        padding: .18in;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="sheet">
+    <h1>Powder Layer & Cure Notes</h1>
+
+    <table>
+      <thead>
+        <tr>
+          <th style="width: 16%;">System</th>
+          <th style="width: 16%;">Film Build</th>
+          <th style="width: 22%;">Flash / Cure Note</th>
+          <th style="width: 46%;">Other Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="kind">Primer</td>
+          <td>thin-medium</td>
+          <td>full cure per product</td>
+          <td>Good default under steel work, and especially useful under textures / cast finishes.</td>
+        </tr>
+        <tr>
+          <td class="kind">Solid base coat</td>
+          <td>medium</td>
+          <td>full cure per product</td>
+          <td>Use as your normal single-stage baseline when you are not stacking colors.</td>
+        </tr>
+        <tr>
+          <td class="kind">Chrome base</td>
+          <td>thin</td>
+          <td>15 min @ 375°F PMT or 10 min @ 400°F PMT</td>
+          <td>Prismatic chrome pages say fully cure before applying the clear / candy top coat.</td>
+        </tr>
+        <tr>
+          <td class="kind">Texture / cast finish</td>
+          <td>medium-thick</td>
+          <td>full cure per product</td>
+          <td>Prismatic texture pages recommend a primer base under all texture and cast finishes.</td>
+        </tr>
+        <tr>
+          <td class="kind">Illusion base</td>
+          <td>medium-thick</td>
+          <td>Flash 5 min after it flows to gloss at 375°F, then cool</td>
+          <td>Prismatic illusion pages say clear is required for the proper color result.</td>
+        </tr>
+        <tr>
+          <td class="kind">Illusion clear top coat</td>
+          <td>medium-thick</td>
+          <td>after part cools, then fully cure top coat</td>
+          <td>Keep base and topcoat thickness even or the color can go blotchy / inconsistent.</td>
+        </tr>
+        <tr>
+          <td class="kind">Candy / transparent over chrome</td>
+          <td>thin-medium</td>
+          <td>full cure per topcoat</td>
+          <td>Go light. Too much candy film darkens fast and can kill the effect.</td>
+        </tr>
+        <tr>
+          <td class="kind">Clear top coat</td>
+          <td>medium</td>
+          <td>full cure per clear</td>
+          <td>Prismatic notes that clears can change the look of the base, so spray a test panel first.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="grid-2">
+      <div class="box">
+        <strong>Quick Build Targets</strong>
+        <ul>
+          <li><strong>Thin:</strong> 1.5-2.0 mil</li>
+          <li><strong>Normal:</strong> 2.0-3.0 mil</li>
+          <li><strong>Thicker / texture:</strong> 3.0-4.0 mil</li>
+        </ul>
+      </div>
+      <div class="box">
+        <strong>Simple Bake Rules</strong>
+        <ul>
+          <li><strong>Chrome bases:</strong> fully cure before top coat.</li>
+          <li><strong>Illusion bases:</strong> flash after gloss, cool, then clear.</li>
+          <li><strong>Textures:</strong> primer under them is recommended on Prismatic texture pages.</li>
+          <li><strong>Any 2-coat system:</strong> test panel first, because clear / candy changes the look.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

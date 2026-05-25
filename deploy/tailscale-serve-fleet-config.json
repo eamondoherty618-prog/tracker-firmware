@@ -1,0 +1,26 @@
+{
+  "version": "0.0.1",
+  "TCP": {
+    "443": {
+      "HTTPS": true
+    }
+  },
+  "Web": {
+    "165-boiler.tail58e171.ts.net:443": {
+      "Handlers": {
+        "/": {
+          "Proxy": "http://127.0.0.1:8080"
+        },
+        "/api/fleet/": {
+          "Proxy": "http://127.0.0.1:8081"
+        },
+        "/fleet/": {
+          "Proxy": "http://127.0.0.1:8081"
+        }
+      }
+    }
+  },
+  "AllowFunnel": {
+    "165-boiler.tail58e171.ts.net:443": true
+  }
+}

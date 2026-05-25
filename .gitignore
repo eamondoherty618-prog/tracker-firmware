@@ -1,0 +1,9 @@
+.pio/
+.vscode/
+compile_commands.json
+data/*.jsonl
+.next/
+frontend/node_modules/
+frontend/.netlify/
+frontend/out/
+*.DS_Store

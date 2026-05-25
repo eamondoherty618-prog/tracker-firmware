@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1200" viewBox="0 0 1200 1200">
+  <rect width="1200" height="1200" fill="#ffffff"/>
+
+  <circle cx="600" cy="600" r="430" fill="#ECFFF6" stroke="#18A76E" stroke-width="26"/>
+  <circle cx="600" cy="600" r="395" fill="none" stroke="#0A315E" stroke-opacity="0.14" stroke-width="4"/>
+
+  <text x="600" y="345" text-anchor="middle" font-family="Arial Black, Arial, Helvetica, sans-serif" font-size="138" fill="#0A315E">123</text>
+
+  <g opacity="0.95">
+    <path d="M360 615C445 590 527 579 607 580C692 581 776 595 848 620" fill="none" stroke="#16A76D" stroke-width="10" stroke-linecap="round"/>
+    <path d="M390 586C445 544 511 521 591 520C668 519 735 537 800 575" fill="none" stroke="#16A76D" stroke-width="10" stroke-linecap="round"/>
+    <path d="M322 612C412 611 501 607 588 607C688 607 770 614 877 628" fill="none" stroke="#0A315E" stroke-opacity="0.16" stroke-width="14" stroke-linecap="round"/>
+  </g>
+
+  <g transform="translate(420 428)">
+    <circle cx="0" cy="35" r="34" fill="#18A76E"/>
+    <circle cx="0" cy="35" r="12" fill="#ECFFF6"/>
+    <path d="M0 66L-42 136H42L0 66Z" fill="#18A76E"/>
+  </g>
+
+  <g transform="translate(548 438)">
+    <rect x="0" y="28" width="158" height="176" rx="28" fill="#0A315E"/>
+    <rect x="18" y="46" width="122" height="140" rx="18" fill="#23B975"/>
+    <rect x="34" y="61" width="72" height="48" transform="skewX(-10)" fill="#F1FFF8"/>
+    <rect x="112" y="61" width="18" height="48" transform="skewX(-10)" fill="#C9F8DF"/>
+    <rect x="18" y="12" width="88" height="18" rx="9" fill="#0A315E"/>
+    <rect x="-8" y="52" width="12" height="78" rx="6" fill="#0A315E"/>
+    <rect x="146" y="26" width="12" height="48" rx="6" fill="#0A315E"/>
+    <rect x="28" y="182" width="56" height="7" rx="3.5" fill="#ffffff"/>
+    <circle cx="122" cy="164" r="8" fill="#ffffff"/>
+    <rect x="36" y="84" width="8" height="18" rx="4" fill="#0A315E"/>
+    <rect x="36" y="118" width="8" height="30" rx="4" fill="#0A315E"/>
+  </g>
+
+  <g transform="translate(760 452)" fill="none" stroke="#18A76E" stroke-width="11" stroke-linecap="round">
+    <path d="M0 24C28 28 52 41 69 60"/>
+    <path d="M0 2C38 6 72 22 95 48"/>
+    <path d="M0 -2C53 3 98 25 128 61"/>
+  </g>
+
+  <text x="600" y="780" text-anchor="middle" font-family="Arial Black, Arial, Helvetica, sans-serif" font-size="88" fill="#0A315E">MOBILE TRACK</text>
+
+  <g fill="none" stroke="#0A315E" stroke-linecap="round">
+    <path d="M350 812C520 790 680 790 850 812" stroke-width="10"/>
+    <path d="M404 846C535 808 665 808 796 846" stroke-width="16"/>
+    <path d="M474 880C559 850 641 850 726 880" stroke-width="14"/>
+    <path d="M532 914C579 893 621 893 668 914" stroke-width="11"/>
+  </g>
+</svg>

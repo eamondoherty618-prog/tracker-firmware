@@ -1,0 +1,80 @@
+<svg width="1200" height="1200" viewBox="0 0 1200 1200" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="badgeBg" x1="600" y1="180" x2="600" y2="1020" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#E8FFF6"/>
+      <stop offset="1" stop-color="#D7F7EC"/>
+    </linearGradient>
+    <linearGradient id="roadFade" x1="270" y1="610" x2="760" y2="610" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#16A76D" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#0A315E" stop-opacity="0.22"/>
+    </linearGradient>
+    <filter id="softShadow" x="0" y="0" width="1200" height="1200" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+      <feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha"/>
+      <feOffset dy="18"/>
+      <feGaussianBlur stdDeviation="24"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.0392 0 0 0 0 0.1922 0 0 0 0 0.3686 0 0 0 0.16 0"/>
+      <feBlend mode="normal" in2="BackgroundImageFix" result="effect1_dropShadow_1_1"/>
+      <feBlend mode="normal" in="SourceGraphic" in2="effect1_dropShadow_1_1" result="shape"/>
+    </filter>
+    <style>
+      .navy { fill: #0A315E; }
+      .green { fill: #16A76D; }
+      .green-stroke { stroke: #16A76D; }
+      .navy-stroke { stroke: #0A315E; }
+      .label { font-family: Arial, Helvetica, sans-serif; font-weight: 900; letter-spacing: 0; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="1200" fill="#FFFFFF"/>
+
+  <g filter="url(#softShadow)">
+    <circle cx="600" cy="600" r="430" fill="url(#badgeBg)"/>
+    <circle cx="600" cy="600" r="430" stroke="#16A76D" stroke-width="28"/>
+    <circle cx="600" cy="600" r="394" stroke="#0A315E" stroke-opacity="0.12" stroke-width="4"/>
+
+    <g transform="translate(0 2)">
+      <path d="M462 268L523 255L511 357L455 344L431 284L462 268Z" class="navy"/>
+      <path d="M569 248C604 246 635 262 654 291C673 321 670 358 644 375H545L561 330H610C619 330 628 324 632 315C635 306 633 294 625 288C612 277 588 277 571 289L539 313L507 291C522 266 544 251 569 248Z" class="navy"/>
+      <path d="M675 255L771 269L760 318L712 311C730 324 742 343 742 365C742 406 709 435 662 435C626 435 594 420 571 395L617 359C630 376 646 385 664 385C679 385 689 377 689 365C689 354 680 347 663 347H633V302L691 290L670 287L675 255Z" class="navy"/>
+    </g>
+
+    <g transform="translate(0 15)">
+      <path d="M368 622L425 470L546 492L502 520C456 524 414 558 389 607L368 622Z" fill="url(#roadFade)"/>
+      <path d="M398 590C430 547 496 519 589 514C661 510 724 525 779 560L790 594C722 564 654 549 584 553C508 557 448 572 398 590Z" fill="#16A76D" fill-opacity="0.28"/>
+      <path d="M347 612C431 589 515 578 601 579C706 580 792 597 879 628L839 632C750 617 670 609 594 609C502 609 420 621 347 612Z" fill="#16A76D" fill-opacity="0.35"/>
+
+      <path d="M470 420C495 420 515 440 515 465C515 490 495 510 470 510C444 510 425 490 425 465C425 440 444 420 470 420ZM470 444C458 444 449 453 449 465C449 477 458 486 470 486C481 486 491 477 491 465C491 453 481 444 470 444Z" class="green"/>
+      <path d="M470 510L422 589L516 589L470 510Z" class="green"/>
+
+      <g transform="translate(545 430)">
+        <rect x="0" y="32" width="170" height="180" rx="28" fill="#0A315E"/>
+        <rect x="18" y="48" width="134" height="144" rx="18" fill="#23B975"/>
+        <rect x="36" y="64" width="70" height="48" transform="skewX(-10)" fill="#EAFEF5" fill-opacity="0.9"/>
+        <rect x="116" y="62" width="18" height="50" transform="skewX(-10)" fill="#CCF8E2"/>
+        <rect x="18" y="18" width="92" height="24" rx="10" fill="#0A315E"/>
+        <rect x="-12" y="52" width="18" height="82" rx="9" fill="#0A315E"/>
+        <rect x="146" y="28" width="18" height="54" rx="9" fill="#0A315E"/>
+        <rect x="28" y="183" width="58" height="8" rx="4" fill="#FFFFFF"/>
+        <circle cx="127" cy="168" r="10" fill="#FFFFFF"/>
+        <rect x="34" y="122" width="10" height="34" rx="5" fill="#0A315E"/>
+        <rect x="34" y="86" width="10" height="18" rx="5" fill="#0A315E"/>
+      </g>
+
+      <g transform="translate(760 434)" stroke="#16A76D" stroke-width="11" stroke-linecap="round">
+        <path d="M0 28C29 31 56 45 72 66"/>
+        <path d="M0 4C38 7 74 25 98 55"/>
+        <path d="M0 0C54 3 103 28 135 69"/>
+      </g>
+    </g>
+
+    <g transform="translate(0 28)">
+      <text x="600" y="732" text-anchor="middle" class="label navy" font-size="92">MOBILE TRACK</text>
+
+      <path d="M338 787C511 762 689 763 860 790" class="navy-stroke" stroke-width="12" stroke-linecap="round"/>
+      <path d="M392 824C528 783 673 783 808 824" class="navy-stroke" stroke-width="20" stroke-linecap="round"/>
+      <path d="M463 861C555 826 646 826 738 861" class="navy-stroke" stroke-width="18" stroke-linecap="round"/>
+      <path d="M530 896C577 873 623 873 670 896" class="navy-stroke" stroke-width="14" stroke-linecap="round"/>
+    </g>
+  </g>
+</svg>

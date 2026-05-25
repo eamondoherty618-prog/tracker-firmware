@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>6 kW Fiber Laser Cheat Sheet - Oxygen</title>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --panel: #ffffff;
+      --ink: #000000;
+      --muted: #333333;
+      --grid: #000000;
+      --accent: #000000;
+      --accent-2: #ffffff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Avenir Next", "Helvetica Neue", Helvetica, Arial, sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+    }
+    .sheet {
+      width: 11in;
+      min-height: 8.5in;
+      margin: 0 auto;
+      padding: .28in;
+      background: var(--panel);
+    }
+    .hero {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 10px;
+      text-align: center;
+    }
+    .title {
+      margin: 0;
+      font-size: 24px;
+      line-height: 1;
+      letter-spacing: -.02em;
+    }
+    .subtitle {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 15px;
+      font-weight: 600;
+    }
+    .badge {
+      background: var(--accent);
+      color: white;
+      border-radius: 0;
+      padding: 8px 12px;
+      text-align: center;
+      justify-self: center;
+      min-width: 220px;
+      border: 2px solid #000;
+    }
+    .badge strong {
+      display: block;
+      font-size: 22px;
+      line-height: 1;
+    }
+    .badge span {
+      display: block;
+      margin-top: 4px;
+      font-size: 11px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+      font-size: 11px;
+    }
+    th, td {
+      border: 1.5px solid var(--grid);
+      padding: 5px 6px;
+      text-align: center;
+      vertical-align: middle;
+    }
+    th {
+      background: #e9e9e9;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+    }
+    td.material {
+      text-align: left;
+      font-weight: 800;
+    }
+    @media print {
+      body { background: white; }
+      .sheet { width: auto; min-height: auto; margin: 0; padding: .18in; }
+      .badge { background: #000 !important; color: #fff !important; }
+    }
+  </style>
+</head>
+<body>
+  <div class="sheet">
+    <div class="hero">
+      <div>
+        <h1 class="title">Oxygen Cut Cheat Sheet</h1>
+      </div>
+      <div class="badge">
+        <strong>O₂</strong>
+        <span>Carbon Steel Focus</span>
+      </div>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th style="width: 19%;">Material</th>
+          <th style="width: 8%;">Thickness (mm)</th>
+          <th style="width: 13%;">Speed (mm/s)</th>
+          <th style="width: 11%;">Power (%)</th>
+          <th style="width: 11%;">Pressure (psi)</th>
+          <th style="width: 11%;">Cut Height</th>
+          <th style="width: 12%;">Focus</th>
+          <th style="width: 10%;">Nozzle</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td class="material">Carbon steel</td><td>4</td><td>62-67</td><td>50-58%</td><td>9-12</td><td>0.6-0.8</td><td>4.0 to 5.5</td><td>Double 1.2</td></tr>
+        <tr><td class="material">Carbon steel</td><td>6</td><td>53-55</td><td>67-75%</td><td>9-12</td><td>0.6-0.8</td><td>4.0 to 5.5</td><td>Double 1.2</td></tr>
+        <tr><td class="material">Carbon steel</td><td>8</td><td>43-47</td><td>67-75%</td><td>9-12</td><td>0.6-0.8</td><td>4.0 to 5.5</td><td>Double 1.2</td></tr>
+        <tr><td class="material">Carbon steel</td><td>8</td><td>42-43</td><td>75-83%</td><td>9-12</td><td>0.6-0.8</td><td>5.5 to 6.5</td><td>Double 1.2</td></tr>
+        <tr><td class="material">Carbon steel</td><td>10</td><td>37-38</td><td>100%</td><td>9-12</td><td>0.6-0.8</td><td>5.5 to 6.5</td><td>Double 1.2</td></tr>
+        <tr><td class="material">Carbon steel</td><td>12</td><td>30-33</td><td>100%</td><td>9-12</td><td>0.6-0.8</td><td>6 to 7</td><td>Double 1.2</td></tr>
+        <tr><td class="material">Carbon steel</td><td>14</td><td>23-28</td><td>100%</td><td>9-12</td><td>0.8</td><td>6 to 7</td><td>Double 1.4 / 1.5</td></tr>
+        <tr><td class="material">Carbon steel</td><td>16</td><td>20-22</td><td>100%</td><td>9-12</td><td>0.8</td><td>6 to 7</td><td>Double 1.4 / 1.5</td></tr>
+        <tr><td class="material">Carbon steel</td><td>18</td><td>12-13</td><td>37-43%</td><td>9-12</td><td>1.5</td><td>2.5 to 3.5</td><td>Double 3.5 / 4.0</td></tr>
+        <tr><td class="material">Carbon steel</td><td>20</td><td>10-11</td><td>37-43%</td><td>9-12</td><td>1.5</td><td>2.5 to 3.5</td><td>Double 4.0</td></tr>
+        <tr><td class="material">Carbon steel</td><td>22</td><td>9-10</td><td>37-43%</td><td>9-12</td><td>1.5</td><td>2.5 to 3.5</td><td>Double 4.0</td></tr>
+        <tr><td class="material">Carbon steel</td><td>25</td><td>8-9</td><td>37-43%</td><td>9-12</td><td>1.5</td><td>2.5 to 4.0</td><td>Double 5.0</td></tr>
+      </tbody>
+    </table>
+  </div>
+</body>
+</html>
