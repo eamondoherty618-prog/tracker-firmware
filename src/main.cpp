@@ -1,8 +1,22 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <BLECharacteristic.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <DNSServer.h>
+#include <Preferences.h>
 #include <TinyGsmClient.h>
+#include <Update.h>
+#include <WebServer.h>
+#include <WiFi.h>
 
 #include "tracker_config.h"
+
+// Fleet tracker GATT service — advertised continuously so the mobile app can
+// discover and claim this tracker via Bluetooth without typing a device ID.
+#define FLEET_BLE_SERVICE_UUID  "1230FACE-0001-4A7E-9C00-000000000001"
+#define FLEET_BLE_DEVINFO_UUID  "1230FACE-0002-4A7E-9C00-000000000001"
 
 namespace {
 
@@ -16,6 +30,13 @@ constexpr size_t QUEUE_DEPTH = 24;
 
 HardwareSerial SerialAT(1);
 TinyGsm modem(SerialAT);
+TinyGsmClientSecure secureClient(modem, 0);
+
+// Runtime credentials — populated from NVS if provisioned, otherwise fall back
+// to the compile-time TRACKER_DEVICE_ID / TRACKER_API_KEY values.
+String g_deviceId;
+String g_apiKey;
+bool g_provisioned = false;
 
 struct QueuedMessage {
   String body;
@@ -27,6 +48,9 @@ size_t queueHead = 0;
 size_t queueCount = 0;
 
 uint32_t lastTelemetryMs = 0;
+uint32_t lastPostSuccessMs = 0;  // watchdog: reset on every confirmed POST
+constexpr uint32_t POST_WATCHDOG_MS = 3UL * 60UL * 1000UL;   // 3 minutes
+uint8_t telemetryCycleCount = 0;
 uint32_t lastSpeedSampleMs = 0;
 float lastSpeedKph = NAN;
 bool gpsEnabled = false;
@@ -35,6 +59,25 @@ uint32_t lastNetworkWaitMs = 0;
 uint32_t gpsEnabledAtMs = 0;
 uint32_t lastGnssStatusLogMs = 0;
 bool lastGpsFix = false;
+bool lastGpsQualityFix = false;
+float lastKnownLat = NAN;
+float lastKnownLon = NAN;
+char lastKnownTimestamp[25] = "";
+float lastKnownCourse = NAN;  // degrees from North, computed from consecutive fixes
+float prevFixLat = NAN;       // lat of previous quality fix (for heading computation)
+float prevFixLon = NAN;
+uint32_t lastFixMs = 0;       // millis() when last quality fix was stored
+// Stationary position lock — freeze reported position when parked to eliminate GPS drift.
+uint32_t stationaryStartMs = 0;
+float stationaryLat = NAN;
+float stationaryLon = NAN;
+constexpr uint32_t STATIONARY_LOCK_MS = 30000UL;  // lock after 30s stopped
+constexpr float STATIONARY_SPEED_KPH = 2.0f;      // below this = stationary
+uint32_t lastAgpsMs = 0;
+uint32_t gpsFirstFixMs = 0;
+bool ignitionOn = false;  // true when alternator voltage detected
+uint16_t g_lastBattMv = 0;
+BLECharacteristic* g_bleDevInfoChar = nullptr;
 
 void powerOnModem() {
   pinMode(MODEM_PWRKEY, OUTPUT);
@@ -260,6 +303,47 @@ bool sendSimpleAt(const String& command, uint32_t timeoutMs = 5000) {
   return waitForOk(timeoutMs);
 }
 
+bool sendVerboseAt(const String& command, uint32_t timeoutMs = 5000) {
+  Serial.print(">>> AT"); Serial.println(command);
+  drainSerialAt();
+  SerialAT.print("AT");
+  SerialAT.print(command);
+  SerialAT.print("\r\n");
+  return waitForOkVerbose(timeoutMs, "    ");
+}
+
+static uint8_t nmeaXorChecksum(const char* sentence) {
+  uint8_t crc = 0;
+  for (int i = 1; sentence[i] && sentence[i] != '*'; i++)
+    crc ^= static_cast<uint8_t>(sentence[i]);
+  return crc;
+}
+
+bool sendGnssNmea(const char* sentence) {
+  char full[80];
+  snprintf(full, sizeof(full), "%s*%02X", sentence, nmeaXorChecksum(sentence));
+  Serial.print("GNSS cmd: "); Serial.println(full);
+  drainSerialAt();
+  SerialAT.print("AT+CGNSCMD=0,\"");
+  SerialAT.print(full);
+  SerialAT.print("\"\r\n");
+  return waitForOk(2000);
+}
+
+// Configures the GNSS engine after power-on: enables GLONASS alongside GPS,
+// SBAS/WAAS differential corrections, and bumps the update rate to 2 Hz.
+void configureGnss() {
+  Serial.println("GNSS: configuring multi-constellation + SBAS + 2 Hz...");
+  sendGnssNmea("$PMTK353,1,1,0,0,1");  // GPS + GLONASS + BeiDou (valid: Galileo off, Galileo-full off)
+  delay(100);
+  sendGnssNmea("$PMTK313,1");           // Enable SBAS search
+  sendGnssNmea("$PMTK301,2");           // SBAS integrity mode (WAAS / EGNOS)
+  delay(100);
+  sendGnssNmea("$PMTK220,500");         // 2 Hz position update rate
+  sendGnssNmea("$PMTK513,1");           // Enable autonomous EPO prediction
+  drainSerialAt();
+}
+
 bool sendAtAndWaitForToken(const String& command, const char* token, uint32_t timeoutMs) {
   drainSerialAt();
   SerialAT.print("AT");
@@ -390,17 +474,191 @@ void connectGprs() {
   Serial.println(gprsConnected ? "GPRS connected" : "GPRS failed");
 }
 
+struct CellInfo {
+  bool valid = false;
+  char radioType[8] = "";  // "lte" | "gsm" | "wcdma"
+  int mcc = 0;
+  int mnc = 0;
+  int lac = 0;   // TAC for LTE, LAC for GSM (field name is the same in MLS API)
+  long cid = 0;  // Serving Cell ID
+};
+
+// Reads AT+CPSI? and parses fields: mode, MCC-MNC (f2), TAC/LAC (f3), Cell ID (f4).
+CellInfo getCellInfo() {
+  CellInfo info;
+  drainSerialAt();
+  SerialAT.print("AT+CPSI?\r\n");
+  const uint32_t deadline = millis() + 5000;
+  String line;
+  bool done = false;
+  while (!done && millis() < deadline) {
+    while (SerialAT.available()) {
+      const char c = SerialAT.read();
+      if (c == '\r') continue;
+      if (c == '\n') {
+        line.trim();
+        if (line.startsWith("+CPSI:")) {
+          String s = line.substring(6);
+          s.trim();
+          // Fields (comma-separated): mode, opMode, MCC-MNC, TAC/LAC, CID, ...
+          int c0 = s.indexOf(',');
+          int c1 = (c0 >= 0) ? s.indexOf(',', c0 + 1) : -1;
+          int c2 = (c1 >= 0) ? s.indexOf(',', c1 + 1) : -1;
+          int c3 = (c2 >= 0) ? s.indexOf(',', c2 + 1) : -1;
+          int c4 = (c3 >= 0) ? s.indexOf(',', c3 + 1) : -1;
+          if (c3 < 0) { done = true; break; }
+          String f0 = s.substring(0, c0);
+          String f2 = s.substring(c1 + 1, c2);
+          String f3 = s.substring(c2 + 1, c3);
+          String f4 = (c4 >= 0) ? s.substring(c3 + 1, c4) : s.substring(c3 + 1);
+          f0.trim(); f2.trim(); f3.trim(); f4.trim();
+          String m = f0; m.toLowerCase();
+          if (m.indexOf("no service") >= 0 || m.indexOf("search") >= 0) { done = true; break; }
+          if (m.indexOf("lte") >= 0 || m.indexOf("cat") >= 0 || m.indexOf("nb") >= 0) {
+            strncpy(info.radioType, "lte", sizeof(info.radioType));
+          } else if (m.indexOf("gsm") >= 0 || m.indexOf("edge") >= 0) {
+            strncpy(info.radioType, "gsm", sizeof(info.radioType));
+          } else if (m.indexOf("wcdma") >= 0) {
+            strncpy(info.radioType, "wcdma", sizeof(info.radioType));
+          } else { done = true; break; }
+          int dash = f2.indexOf('-');
+          if (dash > 0) { info.mcc = f2.substring(0, dash).toInt(); info.mnc = f2.substring(dash + 1).toInt(); }
+          if (f3.startsWith("0x") || f3.startsWith("0X")) {
+            info.lac = (int)strtol(f3.c_str() + 2, nullptr, 16);
+          } else {
+            info.lac = f3.toInt();
+          }
+          info.cid = f4.toInt();
+          info.valid = (info.mcc > 0);
+        }
+        if (line == "OK" || line == "ERROR") done = true;
+        line = "";
+      } else { line += c; }
+    }
+    if (!done) delay(5);
+  }
+  return info;
+}
+
+// Downloads satellite orbit predictions from SIMCom's AGPS server over the active
+// GPRS connection. Reduces cold-start TTFF from ~10 min to under 30 seconds.
+bool downloadAgps() {
+  if (!gprsConnected) return false;
+  Serial.println("AGPS: fetching assistance data...");
+  drainSerialAt();
+  SerialAT.print("AT+CAGPS\r\n");
+
+  const uint32_t deadline = millis() + 60000;
+  String line;
+  bool gotData = false;
+  while (millis() < deadline) {
+    while (SerialAT.available()) {
+      const char c = static_cast<char>(SerialAT.read());
+      if (c == '\r') continue;
+      if (c == '\n') {
+        line.trim();
+        if (line.length() > 0) {
+          Serial.print("AGPS: "); Serial.println(line);
+          if (line.startsWith("+CAGPS:")) gotData = true;
+          if (line == "OK") { lastAgpsMs = millis(); return gotData; }
+          if (line == "ERROR" || line.indexOf("+CME ERROR") >= 0) {
+            Serial.println("AGPS: not supported or server error");
+            // Back off on failure so we don't hammer AT+CAGPS every loop and
+            // starve the GNSS receiver of modem time. Retry on the normal 24h cycle.
+            lastAgpsMs = millis();
+            return false;
+          }
+          line = "";
+        }
+      } else { line += c; }
+    }
+    delay(5);
+  }
+  Serial.println("AGPS: timeout");
+  lastAgpsMs = millis();  // back off after a timeout too
+  return false;
+}
+
+// Persists the last quality GPS fix to NVS so it can be re-injected into the GNSS
+// engine on the next boot — gives the chip a position hypothesis immediately, cutting
+// the satellite-search cone from hemisphere-wide to a few hundred km.
+void saveGnssPosition(float lat, float lon, float alt,
+                      int year, int month, int day,
+                      int hour, int min, int sec) {
+  Preferences prefs;
+  prefs.begin("gnss", false);
+  prefs.putFloat("lat",   lat);
+  prefs.putFloat("lon",   lon);
+  prefs.putFloat("alt",   alt);
+  prefs.putInt("year",  year);
+  prefs.putInt("month", month);
+  prefs.putInt("day",   day);
+  prefs.putInt("hour",  hour);
+  prefs.putInt("min",   min);
+  prefs.putInt("sec",   sec);
+  prefs.end();
+}
+
+void injectSavedPosition() {
+  Preferences prefs;
+  prefs.begin("gnss", true);
+  const float lat  = prefs.getFloat("lat",  NAN);
+  const float lon  = prefs.getFloat("lon",  NAN);
+  const float alt  = prefs.getFloat("alt",  0.0f);
+  const int year   = prefs.getInt("year",   0);
+  const int month  = prefs.getInt("month",  0);
+  const int day    = prefs.getInt("day",    0);
+  const int hour   = prefs.getInt("hour",   0);
+  const int min    = prefs.getInt("min",    0);
+  const int sec    = prefs.getInt("sec",    0);
+  prefs.end();
+
+  if (isnan(lat) || isnan(lon) || year == 0) {
+    Serial.println("GNSS NVS: no saved position");
+    return;
+  }
+  Serial.print("GNSS NVS: injecting "); Serial.print(lat, 5);
+  Serial.print(","); Serial.println(lon, 5);
+  // PMTK740: lat, lon, alt, uncertainty_m, YYYYMMDD, HHMMSS.000, speed_ms
+  // 1000 m uncertainty tells the engine this is a rough hint, not a precise fix.
+  char sentence[128];
+  snprintf(sentence, sizeof(sentence),
+    "$PMTK740,%.6f,%.6f,%.1f,1000.0,%04d%02d%02d,%02d%02d%02d.000,0",
+    lat, lon, alt, year, month, day, hour, min, sec);
+  sendGnssNmea(sentence);
+}
+
 void ensureGps() {
   if (gpsEnabled) {
     return;
   }
 
   Serial.println("Enabling GNSS...");
-  gpsEnabled = modem.enableGPS();
+  gpsEnabled = modem.enableGPS();   // AT+CGNSPWR=1 — powers receiver + active antenna
   Serial.println(gpsEnabled ? "GNSS enabled" : "GNSS enable failed");
   if (gpsEnabled) {
     gpsEnabledAtMs = millis();
     lastGnssStatusLogMs = 0;
+    gpsFirstFixMs = 0;
+
+    // One-time factory reset clears any corrupted GNSS config persisted in the
+    // module's own NVRAM (a malformed earlier $PMTK353 could have done this),
+    // then we re-apply the FULL config below.
+    delay(300);
+    sendGnssNmea("$PMTK104");      // factory reset GNSS core
+    delay(1500);
+
+    // FULL GPS FEATURE SET (restored):
+    sendVerboseAt("+CGNSPWR=1", 3000);          // receiver + ACTIVE ANTENNA power
+    sendVerboseAt("+CGNSMOD=1,1,1,1", 3000);    // GPS+GLONASS+BeiDou+Galileo coverage
+    sendVerboseAt("+CVAUXS=1", 2000);           // aux supply on
+    delay(200);
+    // Hot start from cached AGPS (LTE-assisted) predictions if recent.
+    if (lastAgpsMs > 0 && millis() - lastAgpsMs < 21600000UL) {
+      sendGnssNmea("$PMTK101");
+    }
+    configureGnss();              // SBAS/WAAS + EPO + update rate
+    injectSavedPosition();        // warm-start hint from NVS
   }
 }
 
@@ -423,6 +681,7 @@ void restartGps() {
   modem.disableGPS();
   delay(1000);
   gpsEnabled = false;
+  gpsFirstFixMs = 0;
   ensureGps();
 }
 
@@ -438,6 +697,12 @@ void maintainGps() {
     logGnssStatus();
   }
 
+  // Refresh AGPS every 24h regardless of fix status — keeps satellite predictions fresh.
+  if (gprsConnected && (lastAgpsMs == 0 || nowMs - lastAgpsMs >= 86400000UL)) {
+    downloadAgps();
+  }
+
+  // Only recycle GNSS if no fix at all — a marginal fix means the engine is working.
   if (!lastGpsFix && gpsEnabledAtMs != 0 &&
       nowMs - gpsEnabledAtMs >= TRACKER_GNSS_RECYCLE_MS) {
     restartGps();
@@ -452,7 +717,11 @@ String motionState(float speedKph) {
 }
 
 String trackerDeviceId() {
-  return String(TRACKER_DEVICE_ID);
+  return g_provisioned ? g_deviceId : String(TRACKER_DEVICE_ID);
+}
+
+String trackerApiKey() {
+  return g_provisioned ? g_apiKey : String(TRACKER_API_KEY);
 }
 
 String trackerHardwareId() {
@@ -511,142 +780,377 @@ bool dequeue(String& body) {
   return true;
 }
 
-bool postJson(const String& body) {
-  connectGprs();
-  if (!gprsConnected) {
-    return false;
+bool semverGt(const String& a, const String& b) {
+  int av[3] = {0, 0, 0}, bv[3] = {0, 0, 0};
+  String ta = a, tb = b;
+  for (int i = 0; i < 3; i++) {
+    int d = ta.indexOf('.');
+    av[i] = (d < 0 ? ta : ta.substring(0, d)).toInt();
+    if (d < 0) break;
+    ta = ta.substring(d + 1);
   }
+  for (int i = 0; i < 3; i++) {
+    int d = tb.indexOf('.');
+    bv[i] = (d < 0 ? tb : tb.substring(0, d)).toInt();
+    if (d < 0) break;
+    tb = tb.substring(d + 1);
+  }
+  for (int i = 0; i < 3; i++) {
+    if (av[i] > bv[i]) return true;
+    if (av[i] < bv[i]) return false;
+  }
+  return false;
+}
+
+// Scans raw HTTP response bytes for header/body boundary and Content-Length.
+bool parseHttpHeadersForOta(const uint8_t* buf, int len, int& contentLength, int& bodyStart) {
+  contentLength = -1;
+  bodyStart = -1;
+  for (int i = 0; i <= len - 4; i++) {
+    if (buf[i] == '\r' && buf[i+1] == '\n' && buf[i+2] == '\r' && buf[i+3] == '\n') {
+      bodyStart = i + 4;
+      break;
+    }
+  }
+  if (bodyStart < 0) return false;
+  const char* cl = "content-length:";
+  for (int i = 0; i < bodyStart - 15; i++) {
+    bool match = true;
+    for (int j = 0; j < 15; j++) {
+      if (tolower((unsigned char)buf[i + j]) != cl[j]) { match = false; break; }
+    }
+    if (match) {
+      int s = i + 15;
+      while (s < bodyStart && buf[s] == ' ') s++;
+      contentLength = 0;
+      while (s < bodyStart && buf[s] >= '0' && buf[s] <= '9')
+        contentLength = contentLength * 10 + (buf[s++] - '0');
+      break;
+    }
+  }
+  return true;
+}
+
+void downloadAndApplyOta(const String& version, int sizeHint, const String& md5 = "") {
+  Serial.print("OTA: downloading v"); Serial.println(version);
 
   sendSimpleAt("+CACLOSE=0", 2000);
-
-  if (!sendSimpleAt("+CACID=0", 5000)) {
-    Serial.println("CACID failed");
-    return false;
-  }
-  if (!sendSimpleAt("+CSSLCFG=\"sslversion\",0,3", 5000)) {
-    Serial.println("CSSLCFG sslversion failed");
-    return false;
-  }
+  if (!sendSimpleAt("+CACID=0", 5000)) return;
+  sendSimpleAt("+CSSLCFG=\"sslversion\",0,3", 5000);
   sendSimpleAt("+CSSLCFG=\"ignorertctime\",0,1", 5000);
-  if (!sendSimpleAt("+CASSLCFG=0,ssl,1", 5000)) {
-    Serial.println("CASSLCFG ssl failed");
+  sendSimpleAt("+CASSLCFG=0,ssl,1", 5000);
+  sendAtAndWaitForToken("+CSSLCFG=\"ctxindex\",0", "+CSSLCFG:", 5000);
+  waitForOkVerbose(5000, "ota-ssl");
+  sendSimpleAt("+CASSLCFG=0,protocol,0", 5000);
+  sendSimpleAt(String("+CSSLCFG=\"sni\",0,\"") + TRACKER_SERVER_HOST + "\"", 5000);
+
+  String matchedLine;
+  drainSerialAt();
+  SerialAT.print("AT+CAOPEN=0,\""); SerialAT.print(TRACKER_SERVER_HOST);
+  SerialAT.print("\","); SerialAT.print(TRACKER_SERVER_PORT); SerialAT.print("\r\n");
+  if (!waitForLineContaining("+CAOPEN:", matchedLine, 75000)) {
+    Serial.println("OTA: CAOPEN timeout"); return;
+  }
+  const int oc = matchedLine.lastIndexOf(',');
+  if (oc < 0 || matchedLine.substring(oc + 1).toInt() != 0) {
+    Serial.println("OTA: CAOPEN failed"); sendSimpleAt("+CACLOSE=0", 3000); return;
+  }
+
+  const String req = String("GET /api/fleet/ota/firmware?version=") + version +
+    " HTTP/1.1\r\nHost: " + TRACKER_SERVER_HOST +
+    "\r\nUser-Agent: " + trackerDeviceId() + "/" + TRACKER_FIRMWARE_VERSION +
+    "\r\nx-tracker-key: " + trackerApiKey() +
+    "\r\nConnection: close\r\n\r\n";
+
+  drainSerialAt();
+  SerialAT.print("AT+CASEND=0,"); SerialAT.print(req.length()); SerialAT.print("\r\n");
+  if (!waitForPromptChar('>', 10000)) { sendSimpleAt("+CACLOSE=0", 3000); return; }
+  SerialAT.write(reinterpret_cast<const uint8_t*>(req.c_str()), req.length());
+  SerialAT.flush();
+  if (!waitForLineContaining("+CASEND:", matchedLine, 30000)) {
+    sendSimpleAt("+CACLOSE=0", 3000); return;
+  }
+  Serial.println("OTA: request sent, awaiting headers...");
+  delay(3000);
+
+  static uint8_t otaBuf[1024];
+  int contentLength = sizeHint > 0 ? sizeHint : -1;
+  int bodyStart = -1;
+  int firstChunkRead = 0;
+
+  drainSerialAt();
+  SerialAT.print("AT+CARECV=0,1024\r\n");
+  if (!waitForLineContaining("+CARECV:", matchedLine, 15000)) {
+    Serial.println("OTA: first CARECV timeout"); sendSimpleAt("+CACLOSE=0", 3000); return;
+  }
+  {
+    const int lc = matchedLine.lastIndexOf(',');
+    const int chunkSize = lc >= 0 ? matchedLine.substring(lc + 1).toInt() : 0;
+    if (chunkSize > 0) {
+      const uint32_t dl = millis() + 8000;
+      while (firstChunkRead < chunkSize && millis() < dl) {
+        if (SerialAT.available()) otaBuf[firstChunkRead++] = (uint8_t)SerialAT.read();
+        else delay(1);
+      }
+      waitForOk(2000);
+      parseHttpHeadersForOta(otaBuf, firstChunkRead, contentLength, bodyStart);
+      Serial.print("OTA: Content-Length="); Serial.print(contentLength);
+      Serial.print(" bodyStart="); Serial.println(bodyStart);
+    }
+  }
+
+  if (bodyStart < 0 || contentLength <= 0) {
+    Serial.println("OTA: bad headers, aborting");
+    sendSimpleAt("+CACLOSE=0", 3000); return;
+  }
+
+  if (!Update.begin((size_t)contentLength)) {
+    Serial.print("OTA: Update.begin failed: "); Serial.println(Update.errorString());
+    sendSimpleAt("+CACLOSE=0", 3000); return;
+  }
+  if (md5.length() == 32) {
+    Update.setMD5(md5.c_str());
+    Serial.print("OTA: MD5 check: "); Serial.println(md5);
+  }
+
+  int totalBody = firstChunkRead - bodyStart;
+  if (totalBody > 0) {
+    Update.write(otaBuf + bodyStart, totalBody);
+    Serial.print("OTA: "); Serial.print(totalBody); Serial.print("/"); Serial.println(contentLength);
+  }
+
+  int retries = 0;
+  while (totalBody < contentLength && retries < 60) {
+    drainSerialAt();
+    SerialAT.print("AT+CARECV=0,1024\r\n");
+    if (!waitForLineContaining("+CARECV:", matchedLine, 10000)) {
+      retries++; continue;
+    }
+    const int lc = matchedLine.lastIndexOf(',');
+    const int chunkSize = lc >= 0 ? matchedLine.substring(lc + 1).toInt() : 0;
+    if (chunkSize == 0) { delay(500); retries++; continue; }
+    retries = 0;
+
+    int bytesRead = 0;
+    const uint32_t dl = millis() + 5000;
+    while (bytesRead < chunkSize && millis() < dl) {
+      if (SerialAT.available()) otaBuf[bytesRead++] = (uint8_t)SerialAT.read();
+      else delay(1);
+    }
+    waitForOk(2000);
+
+    const size_t written = Update.write(otaBuf, bytesRead);
+    if ((int)written != bytesRead) {
+      Serial.print("OTA: write error: "); Serial.println(Update.errorString());
+      Update.abort(); sendSimpleAt("+CACLOSE=0", 3000); return;
+    }
+    totalBody += bytesRead;
+    Serial.print("OTA: "); Serial.print(totalBody); Serial.print("/"); Serial.println(contentLength);
+  }
+
+  sendSimpleAt("+CACLOSE=0", 5000);
+
+  if (totalBody < contentLength) {
+    Serial.print("OTA: incomplete — "); Serial.print(totalBody);
+    Serial.print("/"); Serial.println(contentLength);
+    Update.abort(); return;
+  }
+
+  if (!Update.end(true)) {
+    Serial.print("OTA: Update.end failed: "); Serial.println(Update.errorString());
+    return;
+  }
+
+  Serial.println("OTA: SUCCESS — rebooting in 3s...");
+  delay(3000);
+  ESP.restart();
+}
+
+// Scans nearby WiFi networks without connecting. Returns a JSON array of
+// {ssid, bssid, rssi} objects (up to 10 strongest), or "[]" on failure.
+// Puts the radio to sleep again when done.
+String scanWifi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  delay(100);
+
+  const int n = WiFi.scanNetworks(false, false); // blocking, no hidden
+  if (n <= 0) {
+    WiFi.mode(WIFI_OFF);
+    Serial.println("WiFi scan: no networks found");
+    return "[]";
+  }
+
+  Serial.print("WiFi scan: "); Serial.print(n); Serial.println(" networks");
+  JsonDocument scanDoc;
+  JsonArray arr = scanDoc.to<JsonArray>();
+  const int count = (n < 20) ? n : 20;
+  for (int i = 0; i < count; i++) {
+    JsonObject net = arr.add<JsonObject>();
+    net["ssid"] = WiFi.SSID(i);
+    net["bssid"] = WiFi.BSSIDstr(i);
+    net["rssi"] = WiFi.RSSI(i);
+  }
+  WiFi.scanDelete();
+  WiFi.mode(WIFI_OFF);
+
+  String result;
+  serializeJson(scanDoc, result);
+  return result;
+}
+
+// Configure SSL and open a persistent TLS connection to the server.
+bool ensureClientConnected() {
+  if (secureClient.connected()) return true;
+  secureClient.stop();
+  delay(500);
+
+  // SSL configuration — must be set before each connect attempt.
+  sendSimpleAt("+CACID=0", 5000);
+  sendSimpleAt("+CSSLCFG=\"sslversion\",0,3", 3000);
+  sendSimpleAt("+CSSLCFG=\"ignorertctime\",0,1", 3000);
+  sendSimpleAt("+CSSLCFG=\"sni\",0,\"" + String(TRACKER_SERVER_HOST) + "\"", 3000);
+  sendSimpleAt("+CASSLCFG=0,ssl,1", 5000);
+  sendSimpleAt("+CASSLCFG=0,protocol,0", 5000);
+
+  Serial.println("TLS: connecting...");
+  if (!secureClient.connect(TRACKER_SERVER_HOST, TRACKER_SERVER_PORT)) {
+    Serial.println("TLS: connect failed");
     return false;
   }
-  if (!sendAtAndWaitForToken("+CSSLCFG=\"ctxindex\",0", "+CSSLCFG:", 5000) ||
-      !waitForOkVerbose(5000, "ctxindex")) {
-    Serial.println("CSSLCFG ctxindex failed");
+  Serial.println("TLS: connected");
+  return true;
+}
+
+bool postJson(const String& body) {
+  // Skip if signal is too weak — timeouts corrupt modem state.
+  const int sig = modem.getSignalQuality();
+  if (sig == 0 || sig == 99) {
+    Serial.print("Signal too weak ("); Serial.print(sig); Serial.println("), skipping");
     return false;
   }
-  if (!sendSimpleAt("+CASSLCFG=0,protocol,0", 5000)) {
-    Serial.println("CASSLCFG protocol failed");
-    return false;
-  }
-  if (!sendSimpleAt(String("+CSSLCFG=\"sni\",0,\"") + TRACKER_SERVER_HOST + "\"", 5000)) {
-    Serial.println("CSSLCFG sni failed");
-    return false;
-  }
+
+  connectGprs();
+  if (!gprsConnected) return false;
+  if (!ensureClientConnected()) return false;
 
   String request;
-  request.reserve(body.length() + 256);
-  request += "POST ";
-  request += TRACKER_SERVER_PATH;
-  request += " HTTP/1.1\r\nHost: ";
-  request += TRACKER_SERVER_HOST_HEADER;
-  if (TRACKER_SERVER_PORT != 443) {
-    request += ":";
-    request += TRACKER_SERVER_PORT;
-  }
-  request += "\r\nUser-Agent: ";
-  request += trackerDeviceId();
-  request += "/";
-  request += TRACKER_FIRMWARE_VERSION;
-  request += "\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: ";
+  request.reserve(body.length() + 300);
+  request += "POST "; request += TRACKER_SERVER_PATH;
+  request += " HTTP/1.1\r\nHost: "; request += TRACKER_SERVER_HOST_HEADER;
+  request += "\r\nUser-Agent: "; request += trackerDeviceId();
+  request += "/"; request += TRACKER_FIRMWARE_VERSION;
+  request += "\r\nx-tracker-key: "; request += trackerApiKey();
+  request += "\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: ";
   request += body.length();
   request += "\r\n\r\n";
   request += body;
 
-  String matchedLine;
-  drainSerialAt();
-  SerialAT.print("AT+CAOPEN=0,\"");
-  SerialAT.print(TRACKER_SERVER_HOST);
-  SerialAT.print("\",");
-  SerialAT.print(TRACKER_SERVER_PORT);
-  SerialAT.print("\r\n");
-  if (!waitForLineContaining("+CAOPEN:", matchedLine, 75000)) {
-    Serial.println("CAOPEN timeout");
-    return false;
+  secureClient.print(request);
+
+  // Read response with timeout — reset on each byte received.
+  String response;
+  response.reserve(512);
+  uint32_t deadline = millis() + 15000;
+  while (millis() < deadline) {
+    while (secureClient.available()) {
+      response += (char)secureClient.read();
+      deadline = millis() + 2000;
+    }
+    if (!secureClient.connected() && !secureClient.available()) break;
+    delay(10);
   }
-  Serial.print("CAOPEN response: ");
-  Serial.println(matchedLine);
-  const int openComma = matchedLine.lastIndexOf(',');
-  if (openComma < 0 || matchedLine.substring(openComma + 1).toInt() != 0) {
+
+  if (response.length() == 0) {
+    Serial.println("HTTP: no response — dropping connection");
+    secureClient.stop();
     return false;
   }
 
-  drainSerialAt();
-  SerialAT.print("AT+CASEND=0,");
-  SerialAT.print(request.length());
-  SerialAT.print("\r\n");
-  if (!waitForPromptChar('>', 10000)) {
-    Serial.println("CASEND prompt failed");
-    return false;
+  const bool success = response.indexOf(" 2") > 0;
+  Serial.print("HTTP: ");
+  Serial.println(response.substring(0, response.indexOf('\r')));
+
+  // Parse JSON body (after blank line separating headers from body).
+  const int bodyStart = response.indexOf("\r\n\r\n");
+  if (success && bodyStart >= 0) {
+    String respBody = response.substring(bodyStart + 4);
+    const int jsonIdx = respBody.indexOf('{');
+    if (jsonIdx >= 0) respBody = respBody.substring(jsonIdx);
+
+    JsonDocument respDoc;
+    if (deserializeJson(respDoc, respBody) == DeserializationError::Ok) {
+      const char* otaVer = respDoc["ota"]["version"] | "";
+      const int otaSize = respDoc["ota"]["size"] | 0;
+      const char* otaMd5 = respDoc["ota"]["md5"] | "";
+      if (strlen(otaVer) > 0 && semverGt(String(otaVer), String(TRACKER_FIRMWARE_VERSION))) {
+        Serial.print("OTA available: v"); Serial.println(otaVer);
+        secureClient.stop();
+        downloadAndApplyOta(String(otaVer), otaSize, String(otaMd5));
+      }
+      if (!lastGpsQualityFix && !respDoc["wifi_location"]["lat"].isNull()) {
+        const float wLat = respDoc["wifi_location"]["lat"].as<float>();
+        const float wLon = respDoc["wifi_location"]["lon"].as<float>();
+        if (!isnan(wLat) && !isnan(wLon) && wLat != 0.0f) {
+          lastKnownLat = wLat;
+          lastKnownLon = wLon;
+          Serial.print("WiFi geo: "); Serial.print(wLat, 6);
+          Serial.print(","); Serial.println(wLon, 6);
+        }
+      }
+    }
   }
 
-  SerialAT.write(reinterpret_cast<const uint8_t*>(request.c_str()), request.length());
-  SerialAT.write(0x1A);
-  SerialAT.flush();
-  bool casendTimedOut = false;
-  if (!waitForLineContaining("+CASEND:", matchedLine, 30000)) {
-    Serial.println("CASEND response timeout");
-    casendTimedOut = true;
+  return success;
+}
+
+// Standalone OTA check via TinyGsmClientSecure GET — independent of telemetry POST response.
+void checkOtaStandalone() {
+  Serial.println("OTA check: connecting...");
+  const int sig = modem.getSignalQuality();
+  if (sig == 0 || sig == 99) { Serial.println("OTA check: signal too weak"); return; }
+  connectGprs();
+  if (!gprsConnected) return;
+  if (!ensureClientConnected()) return;
+
+  const String req = String("GET /api/fleet/ota/check?version=") + TRACKER_FIRMWARE_VERSION +
+                     "&k=" + trackerApiKey() +
+                     " HTTP/1.1\r\nHost: " + TRACKER_SERVER_HOST_HEADER +
+                     "\r\nUser-Agent: " + trackerDeviceId() + "/" + TRACKER_FIRMWARE_VERSION +
+                     "\r\nConnection: close\r\n\r\n";
+  secureClient.print(req);
+
+  String response;
+  response.reserve(512);
+  uint32_t deadline = millis() + 15000;
+  while (millis() < deadline) {
+    while (secureClient.available()) {
+      response += (char)secureClient.read();
+      deadline = millis() + 2000;
+    }
+    if (!secureClient.connected() && !secureClient.available()) break;
+    delay(10);
+  }
+  secureClient.stop();  // Connection: close — drop so next postJson() reconnects cleanly
+
+  if (response.length() == 0) { Serial.println("OTA check: no response"); return; }
+
+  const int jsonStart = response.indexOf('{');
+  if (jsonStart < 0) return;
+  String body = response.substring(jsonStart);
+
+  JsonDocument doc;
+  if (deserializeJson(doc, body) != DeserializationError::Ok) return;
+  const bool available = doc["available"] | false;
+  const char* version = doc["version"] | "";
+  const int size = doc["size"] | 0;
+  const char* md5 = doc["md5"] | "";
+  if (available && strlen(version) > 0 && semverGt(String(version), String(TRACKER_FIRMWARE_VERSION))) {
+    Serial.print("OTA check: update available v"); Serial.println(version);
+    downloadAndApplyOta(String(version), size, String(md5));
   } else {
-    Serial.print("CASEND response: ");
-    Serial.println(matchedLine);
-
-    const int firstComma = matchedLine.indexOf(',');
-    const int secondComma = matchedLine.indexOf(',', firstComma + 1);
-    const int sendResult =
-        (firstComma >= 0 && secondComma > firstComma)
-            ? matchedLine.substring(firstComma + 1, secondComma).toInt()
-            : -1;
-    const int sentBytes =
-        (secondComma > firstComma) ? matchedLine.substring(secondComma + 1).toInt() : -1;
-    if (sendResult != 0 || sentBytes != request.length()) {
-      return false;
-    }
+    Serial.println("OTA check: up to date");
   }
-
-  delay(1500);
-  drainSerialAt();
-  SerialAT.print("AT+CARECV=0,512\r\n");
-  if (!waitForLineContaining("+CARECV:", matchedLine, 15000)) {
-    Serial.println("CARECV timeout");
-    sendSimpleAt("+CACLOSE=0", 5000);
-    if (casendTimedOut) {
-      Serial.println("Assuming POST success after send/receive timeout");
-      return true;
-    }
-    return false;
-  }
-  Serial.print("CARECV response: ");
-  Serial.println(matchedLine);
-
-  String statusLine;
-  waitForLineContaining("HTTP/", statusLine, 5000);
-  if (statusLine.length() > 0) {
-    Serial.print("HTTP status: ");
-    Serial.println(statusLine);
-  }
-
-  sendSimpleAt("+CACLOSE=0", 5000);
-  if (statusLine.indexOf(" 2") > 0) {
-    return true;
-  }
-  if (casendTimedOut) {
-    Serial.println("Assuming POST success after CASEND timeout");
-    return true;
-  }
-  return false;
 }
 
 void flushQueue() {
@@ -677,15 +1181,127 @@ String buildTelemetry() {
   int minute = 0;
   int second = 0;
 
+  // Drain accumulated modem URCs before querying GPS to avoid stale/corrupt responses.
+  drainSerialAt();
   const bool hasFix = modem.getGPS(&lat, &lon, &speedKph, &altitudeM, &visibleSatellites,
                                    &usedSatellites, &accuracyM, &year, &month, &day,
                                    &hour, &minute, &second);
+  // Quality filter: HDOP (filled into accuracyM by TinyGSM via CGNSINF) above 2.5 or
+  // fewer than 4 used satellites → marginal fix; still reported but not treated as authoritative.
+  bool qualityFix = hasFix && usedSatellites >= 4 &&
+      (isnan(accuracyM) || accuracyM <= 2.5f);
+  if (hasFix && !qualityFix) {
+    Serial.print("GNSS: marginal fix — sats="); Serial.print(usedSatellites);
+    Serial.print(" HDOP="); Serial.println(accuracyM);
+  }
+  // Outlier rejection: a sudden position jump that implies impossible speed is a bad fix.
+  if (qualityFix && !isnan(prevFixLat) && lastFixMs > 0) {
+    const float elapsedS = static_cast<float>(millis() - lastFixMs) / 1000.0f;
+    if (elapsedS > 0.0f && elapsedS < 60.0f) {
+      const float dlat = lat - prevFixLat;
+      const float dlon = (lon - prevFixLon) * cos(radians(lat));
+      const float distM = sqrtf(dlat * dlat + dlon * dlon) * 111111.0f;
+      const float impliedKph = (distM / elapsedS) * 3.6f;
+      if (impliedKph > 300.0f) {
+        Serial.print("GNSS: outlier rejected — implied "); Serial.print(impliedKph, 0); Serial.println(" kph");
+        qualityFix = false;
+      }
+    }
+  }
   lastGpsFix = hasFix;
+  lastGpsQualityFix = qualityFix;
+  if (hasFix && !isnan(lat) && !isnan(lon)) {
+    if (qualityFix) {
+      if (gpsFirstFixMs == 0) gpsFirstFixMs = millis();
+      // Compute course from two consecutive quality fixes when moving fast enough
+      // for the position delta to be larger than GPS noise (~5m).
+      if (!isnan(prevFixLat) && !isnan(prevFixLon) && !isnan(speedKph) && speedKph >= 8.0f) {
+        const float dLon = radians(lon - prevFixLon);
+        const float rlat1 = radians(prevFixLat);
+        const float rlat2 = radians(lat);
+        const float y = sin(dLon) * cos(rlat2);
+        const float x = cos(rlat1) * sin(rlat2) - sin(rlat1) * cos(rlat2) * cos(dLon);
+        lastKnownCourse = fmod(degrees(atan2(y, x)) + 360.0f, 360.0f);
+      }
+      prevFixLat = lat;
+      prevFixLon = lon;
+      lastFixMs = millis();
+      lastKnownLat = lat;
+      lastKnownLon = lon;
+      // Persist position to NVS every 5 min for warm-start injection on next reboot.
+      static uint32_t lastNvsSaveMs = 0;
+      if (year > 0 && (lastNvsSaveMs == 0 || millis() - lastNvsSaveMs >= 300000UL)) {
+        lastNvsSaveMs = millis();
+        saveGnssPosition(lat, lon, altitudeM, year, month, day, hour, minute, second);
+      }
+    }
+    if (year > 0) {
+      snprintf(lastKnownTimestamp, sizeof(lastKnownTimestamp), "%04d-%02d-%02dT%02d:%02d:%02dZ",
+               year, month, day, hour, minute, second);
+    }
+  }
+
+  // Stationary position lock: once stopped for STATIONARY_LOCK_MS, freeze lat/lon
+  // to eliminate GPS multipath drift while parked. Reset when speed picks up.
+  if (qualityFix) {
+    if (!isnan(speedKph) && speedKph < STATIONARY_SPEED_KPH) {
+      if (stationaryStartMs == 0) stationaryStartMs = millis();
+      if (millis() - stationaryStartMs >= STATIONARY_LOCK_MS) {
+        if (isnan(stationaryLat)) { stationaryLat = lat; stationaryLon = lon; }
+        lat = stationaryLat;
+        lon = stationaryLon;
+      }
+    } else {
+      stationaryStartMs = 0;
+      stationaryLat = NAN;
+      stationaryLon = NAN;
+    }
+  }
+
+  // WiFi scan for location fallback. CRITICAL: turning on the ESP32 WiFi radio
+  // emits 2.4GHz RF + spikes current right next to the GPS front-end, which
+  // desensitises the receiver and knocks out the weak-signal acquisition GPS
+  // needs an uninterrupted window to complete. So:
+  //  • While GPS has NOT yet achieved its first fix, give it a long clean
+  //    runway — do NOT scan WiFi for the first 5 min, then only every 5 min.
+  //  • Once GPS has a fix, WiFi scanning is harmless (used only as backup).
+  String wifiScanJson;
+  static uint32_t lastWifiScanMs = 0;
+  const uint32_t nowMsWifi = millis();
+  const bool gpsAcquiring = !lastGpsQualityFix && gpsEnabled;
+  const uint32_t gnssRunMs = gpsEnabledAtMs ? (nowMsWifi - gpsEnabledAtMs) : 0;
+  // Suppress WiFi entirely for the first 5 min of GPS acquisition.
+  const bool suppressForGpsAcq = gpsAcquiring && gnssRunMs < 300000UL;
+  const uint32_t wifiInterval = qualityFix ? 300000UL : 300000UL;  // 5 min either way now
+  if (!suppressForGpsAcq && (lastWifiScanMs == 0 || nowMsWifi - lastWifiScanMs >= wifiInterval)) {
+    lastWifiScanMs = nowMsWifi;
+    wifiScanJson = scanWifi();
+    drainSerialAt(); // clear URCs that piled up during the blocking WiFi scan
+  }
+
   const uint32_t nowMs = millis();
-  const String eventName = hasFix ? classifyEvent(speedKph, nowMs) : "";
+  const String eventName = qualityFix ? classifyEvent(speedKph, nowMs) : "";
 
   int16_t rssi = modem.getSignalQuality();
   uint16_t batteryMv = modem.getBattVoltage();
+  g_lastBattMv = batteryMv;
+
+  // Ignition detection: alternator charges at 13.2–14.4V; battery-only is below 12.8V.
+  // Hysteresis: latch ON above IGNITION_ON_MV, latch OFF below IGNITION_OFF_MV.
+  // Zero means the voltage read failed — keep previous state rather than flipping.
+  if (batteryMv >= TRACKER_IGNITION_ON_MV) {
+    ignitionOn = true;
+  } else if (batteryMv > 0 && batteryMv < TRACKER_IGNITION_OFF_MV) {
+    ignitionOn = false;
+  }
+
+  // Collect cell tower identity when no quality fix — sent to server for geolocation.
+  CellInfo cellInfo;
+  if (!qualityFix) {
+    drainSerialAt();
+    cellInfo = getCellInfo();
+    drainSerialAt();
+  }
 
   JsonDocument doc;
   doc["device_id"] = trackerDeviceId();
@@ -693,7 +1309,25 @@ String buildTelemetry() {
   doc["uptime_ms"] = nowMs;
   doc["firmware"] = TRACKER_FIRMWARE_VERSION;
   doc["has_fix"] = hasFix;
+  doc["fix_source"] = qualityFix ? "GPS" : (hasFix ? "GPS_MARGINAL" : "None");
+  // GNSS diagnostics — always reported so we can tell "blind" (0 visible =
+  // antenna/RF problem) from "searching" (visible>0 but not enough used = cold
+  // start / weak sky). Also report how long GNSS has been enabled this boot.
+  doc["sats_visible"] = visibleSatellites;
+  doc["sats_used"] = usedSatellites;
+  doc["gnss_on_ms"] = gpsEnabled && gpsEnabledAtMs ? (nowMs - gpsEnabledAtMs) : 0;
+  doc["gnss_enabled"] = gpsEnabled;
+  // Raw CGNSINF string — lets us read C/N0 (signal strength). C/N0=0 with 0 sats
+  // = no RF reaching the receiver (antenna); C/N0>0 = signal present, locking issue.
+  if (!qualityFix) {
+    String graw = modem.getGPSraw();
+    if (graw.length() > 0) doc["gnss_raw"] = graw;
+  }
+  if (gpsFirstFixMs > 0 && gpsEnabledAtMs > 0) {
+    doc["ttff_ms"] = gpsFirstFixMs - gpsEnabledAtMs;
+  }
   doc["motion_state"] = hasFix ? motionState(speedKph) : "unknown";
+  doc["ignition_on"] = ignitionOn;
   doc["cell_rssi"] = rssi;
   doc["battery_mv"] = batteryMv;
   doc["queued_messages"] = queueCount;
@@ -713,6 +1347,9 @@ String buildTelemetry() {
     if (!isnan(accuracyM)) {
       gps["accuracy_m"] = serialized(String(accuracyM, 2));
     }
+    if (!isnan(lastKnownCourse)) {
+      gps["course_deg"] = serialized(String(lastKnownCourse, 1));
+    }
     if (year > 0) {
       char timestamp[25];
       snprintf(timestamp, sizeof(timestamp), "%04d-%02d-%02dT%02d:%02d:%02dZ",
@@ -721,16 +1358,303 @@ String buildTelemetry() {
     }
   }
 
+  if (!qualityFix && !isnan(lastKnownLat) && !isnan(lastKnownLon)) {
+    JsonObject lastGps = doc["last_gps"].to<JsonObject>();
+    lastGps["lat"] = serialized(String(lastKnownLat, 6));
+    lastGps["lon"] = serialized(String(lastKnownLon, 6));
+    if (lastKnownTimestamp[0] != '\0') {
+      lastGps["time"] = lastKnownTimestamp;
+    }
+  }
+
+  if (!qualityFix && wifiScanJson.length() > 2) { // "[]" is 2 chars — only add if networks found
+    JsonDocument wifiDoc;
+    if (deserializeJson(wifiDoc, wifiScanJson) == DeserializationError::Ok) {
+      doc["wifi_scan"] = wifiDoc;
+    }
+  }
+
+  // Dead reckoning: extrapolate last known position using speed + course.
+  // Only valid for ≤5 min and ≤5 km — beyond that, drift makes it unreliable.
+  if (!qualityFix && !isnan(lastKnownLat) && !isnan(lastKnownLon) &&
+      !isnan(lastKnownCourse) && !isnan(lastSpeedKph) && lastSpeedKph >= 3.0f &&
+      lastFixMs > 0) {
+    const float elapsedSec = static_cast<float>(millis() - lastFixMs) / 1000.0f;
+    if (elapsedSec > 0.0f && elapsedSec <= 300.0f) {
+      const float distM = (lastSpeedKph / 3.6f) * elapsedSec;
+      if (distM < 5000.0f) {
+        const float hr = radians(lastKnownCourse);
+        const float drLat = lastKnownLat + (distM / 111111.0f) * cos(hr);
+        const float drLon = lastKnownLon +
+            (distM / (111111.0f * cos(radians(lastKnownLat)))) * sin(hr);
+        JsonObject dr = doc["dead_reckoning"].to<JsonObject>();
+        dr["lat"] = serialized(String(drLat, 6));
+        dr["lon"] = serialized(String(drLon, 6));
+        dr["elapsed_s"] = static_cast<int>(elapsedSec);
+        dr["course_deg"] = serialized(String(lastKnownCourse, 1));
+      }
+    }
+  }
+
+  if (!qualityFix && cellInfo.valid) {
+    JsonObject ci = doc["cell_info"].to<JsonObject>();
+    ci["radio"] = cellInfo.radioType;
+    ci["mcc"] = cellInfo.mcc;
+    ci["mnc"] = cellInfo.mnc;
+    ci["lac"] = cellInfo.lac;
+    ci["cid"] = cellInfo.cid;
+  }
+
   String body;
   serializeJson(doc, body);
   return body;
 }
 
 uint32_t nextIntervalMs() {
-  if (isnan(lastSpeedKph) || lastSpeedKph >= TRACKER_MIN_MOVING_SPEED_KPH) {
-    return TRACKER_MOVING_INTERVAL_MS;
+  if (!lastGpsQualityFix) return TRACKER_MOVING_INTERVAL_MS;  // seeking fix — stay fast
+  if (isnan(lastSpeedKph) || lastSpeedKph < TRACKER_MIN_MOVING_SPEED_KPH) {
+    return ignitionOn ? 30000UL : TRACKER_PARKED_INTERVAL_MS;  // idle engine: 30s, off: 120s
   }
-  return TRACKER_PARKED_INTERVAL_MS;
+  // Adaptive: faster updates at highway speeds for accurate trip reconstruction.
+  if (lastSpeedKph >= 80.0f) return 5000UL;   // highway: 5s
+  if (lastSpeedKph >= 30.0f) return TRACKER_MOVING_INTERVAL_MS;  // city: 10s
+  return 30000UL;                               // slow creep: 30s
+}
+
+// ─── NVS credential helpers ──────────────────────────────────────────────────
+
+void loadCredentials() {
+  Preferences prefs;
+  prefs.begin("tracker", true);
+  g_deviceId = prefs.getString("device_id", "");
+  g_apiKey   = prefs.getString("api_key",   "");
+  prefs.end();
+  g_provisioned = g_deviceId.length() > 0 && g_apiKey.length() > 0;
+  if (g_provisioned) {
+    Serial.print("Provisioned as: "); Serial.println(g_deviceId);
+  } else {
+    Serial.println("Not provisioned — will enter setup mode.");
+  }
+}
+
+void saveCredentials(const String& deviceId, const String& apiKey) {
+  Preferences prefs;
+  prefs.begin("tracker", false);
+  prefs.putString("device_id", deviceId);
+  prefs.putString("api_key",   apiKey);
+  prefs.end();
+  g_deviceId    = deviceId;
+  g_apiKey      = apiKey;
+  g_provisioned = true;
+}
+
+// ─── Cellular helpers for provisioning calls ─────────────────────────────────
+
+// Send a GET or POST via CAOPEN/CASEND to the Lambda relay.
+// Returns the HTTP response body (empty on failure).
+String cellularRequest(const char* method, const String& path, const String& body = "") {
+  connectGprs();
+  if (!gprsConnected) return "";
+
+  sendSimpleAt("+CACLOSE=0", 2000);
+  if (!sendSimpleAt("+CACID=0", 5000)) return "";
+  sendSimpleAt("+CSSLCFG=\"sslversion\",0,3", 5000);
+  sendSimpleAt("+CSSLCFG=\"ignorertctime\",0,1", 5000);
+  sendSimpleAt("+CASSLCFG=0,ssl,1", 5000);
+  sendAtAndWaitForToken("+CSSLCFG=\"ctxindex\",0", "+CSSLCFG:", 5000);
+  waitForOkVerbose(5000, "ctxindex");
+  sendSimpleAt("+CASSLCFG=0,protocol,0", 5000);
+  sendSimpleAt(String("+CSSLCFG=\"sni\",0,\"") + TRACKER_SERVER_HOST + "\"", 5000);
+
+  String request = String(method) + " " + path + " HTTP/1.1\r\nHost: " +
+                   TRACKER_SERVER_HOST + "\r\nUser-Agent: tracker-setup/" +
+                   TRACKER_FIRMWARE_VERSION + "\r\nConnection: close\r\n";
+  if (body.length() > 0) {
+    request += "Content-Type: application/json\r\nContent-Length: ";
+    request += body.length();
+    request += "\r\n";
+  }
+  request += "\r\n";
+  request += body;
+
+  String matchedLine;
+  drainSerialAt();
+  SerialAT.print("AT+CAOPEN=0,\""); SerialAT.print(TRACKER_SERVER_HOST);
+  SerialAT.print("\","); SerialAT.print(TRACKER_SERVER_PORT); SerialAT.print("\r\n");
+  if (!waitForLineContaining("+CAOPEN:", matchedLine, 75000)) { return ""; }
+  const int comma = matchedLine.lastIndexOf(',');
+  if (comma < 0 || matchedLine.substring(comma + 1).toInt() != 0) {
+    sendSimpleAt("+CACLOSE=0", 3000); return "";
+  }
+
+  drainSerialAt();
+  SerialAT.print("AT+CASEND=0,"); SerialAT.print(request.length()); SerialAT.print("\r\n");
+  if (!waitForPromptChar('>', 10000)) { sendSimpleAt("+CACLOSE=0", 3000); return ""; }
+  SerialAT.write(reinterpret_cast<const uint8_t*>(request.c_str()), request.length());
+  SerialAT.write(0x1A); SerialAT.flush();
+  if (!waitForLineContaining("+CASEND:", matchedLine, 30000)) {
+    sendSimpleAt("+CACLOSE=0", 3000); return "";
+  }
+
+  delay(1500);
+  drainSerialAt();
+  SerialAT.print("AT+CARECV=0,1024\r\n");
+  if (!waitForLineContaining("+CARECV:", matchedLine, 15000)) {
+    sendSimpleAt("+CACLOSE=0", 5000); return "";
+  }
+
+  // Collect the response body (JSON is after the blank header line).
+  String responseBody;
+  waitForLineContaining("{", responseBody, 5000);
+  sendSimpleAt("+CACLOSE=0", 5000);
+  return responseBody;
+}
+
+// ─── Provisioning mode (WiFi AP + captive portal + cellular poll) ────────────
+
+static const char CAPTIVE_HTML[] PROGMEM = R"html(<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>123 Mobile Track Setup</title>
+<style>
+  body{font-family:-apple-system,sans-serif;background:#f4f7f4;display:flex;
+    align-items:center;justify-content:center;min-height:100vh;margin:0;padding:16px;box-sizing:border-box}
+  .card{background:#fff;border-radius:16px;padding:28px 24px;max-width:360px;
+    width:100%;box-shadow:0 4px 24px rgba(0,0,0,.10);text-align:center}
+  h1{color:#1a2e1a;font-size:1.3rem;margin:0 0 6px}
+  .sub{color:#64748b;font-size:.85rem;line-height:1.5;margin:0 0 20px}
+  .hw{font-family:monospace;background:#f1f5f9;border-radius:8px;
+    padding:10px 16px;font-size:1.1rem;color:#1a2e1a;display:block;margin:0 0 20px;letter-spacing:.05em}
+  .steps{text-align:left;background:#f8faf8;border-radius:10px;padding:14px 16px;margin:0 0 20px}
+  .steps p{color:#374151;font-size:.82rem;line-height:1.6;margin:0}
+  .steps b{color:#1a2e1a}
+  button.btn,a.btn{display:block;width:100%;background:#1a2e1a;color:#fff;padding:13px 20px;
+    border-radius:10px;text-decoration:none;font-weight:600;font-size:.95rem;
+    border:none;cursor:pointer;box-sizing:border-box;margin-bottom:10px}
+  button.btn:active,a.btn:active{opacity:.85}
+  .note{color:#94a3b8;font-size:.78rem;margin:0}
+  #copied{color:#16a34a;font-size:.82rem;margin:8px 0 0;display:none}
+</style></head>
+<body><div class="card">
+  <h1>123 Mobile Track</h1>
+  <p class="sub">New tracker detected</p>
+  <div class="hw">__HWID__</div>
+  <p style="margin:0 0 8px;font-size:.82rem;color:#64748b">Tap the link below to select it, then copy and paste it into your browser&rsquo;s <b>address bar</b> after disconnecting from this WiFi.</p>
+  <textarea id="url" onclick="this.select()" readonly rows="2"
+    style="width:100%;box-sizing:border-box;font-family:monospace;font-size:.78rem;padding:10px;border-radius:8px;border:2px solid #1a2e1a;background:#f8faf8;color:#1a2e1a;resize:none;-webkit-user-select:all;user-select:all">https://123mobiletrack.com/devices/add?hw=__HWID__</textarea>
+  <button class="btn" style="margin-top:10px" onclick="
+    var t=document.getElementById('url');
+    t.select();t.setSelectionRange(0,999);
+    try{document.execCommand('copy');document.getElementById('copied').style.display='block';}catch(e){}
+  ">Copy link</button>
+  <div id="copied" style="color:#16a34a;font-size:.82rem;margin:6px 0 0;display:none">Copied! Now disconnect from this WiFi and paste in your browser address bar.</div>
+  <p class="note" style="margin-top:10px">Hardware ID: __HWID__</p>
+</div></body></html>)html";
+
+void runProvisioningMode() {
+  const String hwId = trackerHardwareId();
+  const String ssid = String("123Track-") + hwId.substring(hwId.length() - 4);
+  Serial.print("Starting provisioning WiFi AP: "); Serial.println(ssid);
+
+  // Register as pending via cellular.
+  const String initBody = String("{\"hardware_id\":\"") + hwId + "\"}";
+  const String initResp = cellularRequest("POST", "/api/fleet/provision/init", initBody);
+  Serial.print("Provision init: "); Serial.println(initResp.length() ? initResp : "(no response)");
+
+  // Start WiFi AP.
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(ssid.c_str());
+  delay(500);
+  Serial.print("AP IP: "); Serial.println(WiFi.softAPIP());
+
+  // DNS server — redirect everything to 192.168.4.1 for captive portal.
+  DNSServer dns;
+  dns.start(53, "*", WiFi.softAPIP());
+
+  // Web server — serve the setup page and handle captive portal probes.
+  WebServer server(80);
+  String htmlPage = String(CAPTIVE_HTML);
+  htmlPage.replace("__HWID__", hwId);
+  htmlPage.replace("__HWID__", hwId); // replace both occurrences
+
+  auto servePage = [&]() { server.send(200, "text/html", htmlPage); };
+  auto redirect  = [&]() { server.sendHeader("Location", "http://192.168.4.1/"); server.send(302); };
+  server.on("/",                    HTTP_GET, servePage);   // portal page
+  server.on("/hotspot-detect.html", HTTP_GET, redirect);   // iOS — redirect triggers CNA popup
+  server.on("/success.html",        HTTP_GET, redirect);   // iOS alt
+  server.on("/generate_204",        HTTP_GET, redirect);   // Android
+  server.on("/gen_204",             HTTP_GET, redirect);   // Android alt
+  server.on("/ncsi.txt",            HTTP_GET, redirect);   // Windows
+  server.on("/connecttest.txt",     HTTP_GET, redirect);   // Windows
+  server.on("/redirect",            HTTP_GET, redirect);
+  server.onNotFound(redirect);                             // catch-all → redirect to portal
+  server.begin();
+
+  Serial.println("Waiting to be claimed... (polls cellular every 15s)");
+
+  uint32_t lastPollMs = millis(); // delay first poll so web server can respond immediately
+  const uint32_t POLL_INTERVAL = 15000;
+
+  while (true) {
+    dns.processNextRequest();
+    server.handleClient();
+
+    const uint32_t now = millis();
+    if (now - lastPollMs >= POLL_INTERVAL) {
+      lastPollMs = now;
+      // Flush any pending HTTP requests before blocking on cellular
+      const uint32_t flushEnd = millis() + 500;
+      while (millis() < flushEnd) { dns.processNextRequest(); server.handleClient(); delay(5); }
+      Serial.print("Polling for claim... ");
+      const String resp = cellularRequest("GET",
+        String("/api/fleet/provision/poll?hw=") + hwId);
+      Serial.println(resp.length() ? resp : "(no response)");
+
+      if (resp.indexOf("\"claimed\":true") >= 0) {
+        // Parse device_id and api_key from the JSON response.
+        JsonDocument doc;
+        if (deserializeJson(doc, resp) == DeserializationError::Ok) {
+          const String newDeviceId = doc["device_id"].as<String>();
+          const String newApiKey   = doc["api_key"].as<String>();
+          if (newDeviceId.length() > 0 && newApiKey.length() > 0) {
+            Serial.print("Claimed! Device ID: "); Serial.println(newDeviceId);
+            saveCredentials(newDeviceId, newApiKey);
+            server.stop(); dns.stop(); WiFi.softAPdisconnect(true);
+            delay(1000);
+            Serial.println("Rebooting into tracking mode...");
+            ESP.restart();
+          }
+        }
+      }
+    }
+
+    delay(10);
+  }
+}
+
+void updateBleDevInfo() {
+  if (!g_bleDevInfoChar) return;
+  char buf[96];
+  snprintf(buf, sizeof(buf),
+    "{\"device_id\":\"%s\",\"fw\":\"%s\",\"batt_mv\":%u}",
+    trackerDeviceId().c_str(), TRACKER_FIRMWARE_VERSION, g_lastBattMv);
+  g_bleDevInfoChar->setValue(std::string(buf));
+}
+
+void startBleAdvertising() {
+  BLEDevice::init("123Track");
+  BLEServer*    server  = BLEDevice::createServer();
+  BLEService*   service = server->createService(FLEET_BLE_SERVICE_UUID);
+  g_bleDevInfoChar = service->createCharacteristic(
+    FLEET_BLE_DEVINFO_UUID, BLECharacteristic::PROPERTY_READ);
+  updateBleDevInfo();
+  service->start();
+  BLEAdvertising* adv = BLEDevice::getAdvertising();
+  adv->addServiceUUID(FLEET_BLE_SERVICE_UUID);
+  adv->setScanResponse(true);
+  adv->setMinPreferred(0x06);
+  BLEDevice::startAdvertising();
+  Serial.println("BLE: advertising as 123Track");
 }
 
 }  // namespace
@@ -739,7 +1663,14 @@ void setup() {
   Serial.begin(115200);
   delay(500);
   Serial.println();
-  Serial.println("Fleet tracker prototype booting");
+  Serial.println("Fleet tracker booting");
+
+  loadCredentials();
+  // BLE advertising is setup-only (claiming a new tracker). Provisioned trackers
+  // MUST skip it: BLE and WiFi share the ESP32's 2.4GHz radio, and running BLE
+  // kills WiFi.scanNetworks() — which breaks WiFi-shortcut geolocation (the
+  // location source when there's no GPS fix). Only unclaimed trackers advertise.
+  if (!g_provisioned) startBleAdvertising();
 
   powerOnModem();
   SerialAT.begin(MODEM_BAUD, SERIAL_8N1, MODEM_RX, MODEM_TX);
@@ -752,17 +1683,100 @@ void setup() {
 
   Serial.print("Modem: ");
   Serial.println(modem.getModemInfo());
-  logSimDiagnostics();
   configureNetworkMode();
 
+  if (!g_provisioned) {
+    // Fall back to compile-time credentials if defined (legacy / pre-provisioned boards).
+    // New boards ship with TRACKER_DEVICE_ID="unprovisioned" and enter setup mode.
+    if (String(TRACKER_DEVICE_ID) != "unprovisioned" && String(TRACKER_DEVICE_ID).length() > 0) {
+      // Persist compile-time credentials to NVS so OTA updates preserve this tracker's identity.
+      saveCredentials(String(TRACKER_DEVICE_ID), String(TRACKER_API_KEY));
+      loadCredentials();
+      Serial.println("Saved compile-time credentials to NVS for OTA persistence.");
+    } else {
+      // No NVS credentials and no compile-time ID — enter WiFi AP provisioning mode.
+      // This never returns; ESP.restart() exits it after claim.
+      runProvisioningMode();
+    }
+  }
+
+  logSimDiagnostics();
   connectGprs();
+  downloadAgps();
   ensureGps();
 }
 
+// ─── GPS ISOLATION TEST ──────────────────────────────────────────────────────
+// Drops the cellular DATA session and streams the raw GNSS status to serial so we
+// can see, directly off the chip, whether GPS acquires satellites with cellular
+// quiet. If sats/C-N0 climb here but not in normal operation, the cellular data
+// session was starving GPS. Remove this block to restore normal operation.
+#define GPS_ISOLATION_TEST 1
+#if GPS_ISOLATION_TEST
+void loop() {
+  maintainGps();   // keeps GNSS powered + configured (CGNSPWR/CGNSMOD/etc.)
+
+  static bool dropped = false;
+  if (!dropped) {
+    Serial.println("\n=== GPS ISOLATION TEST: cellular data OFF, watching GNSS ===");
+    modem.gprsDisconnect();          // drop the LTE data session
+    dropped = true;
+  }
+
+  static uint32_t lastLog = 0;
+  if (millis() - lastLog >= 3000) {
+    lastLog = millis();
+    drainSerialAt();
+    String raw = modem.getGPSraw();  // AT+CGNSINF straight from the module
+    // Parse: field 2 = fix, field 15 = sats-in-view, field 19 = C/N0 max.
+    int fix = -1, sview = -1, cn0 = -1;
+    {
+      int idx = 0, start = 0;
+      for (int i = 0; i <= (int)raw.length(); i++) {
+        if (i == (int)raw.length() || raw[i] == ',') {
+          String fld = raw.substring(start, i); start = i + 1;
+          if (idx == 1 && fld.length()) fix = fld.toInt();
+          if (idx == 14 && fld.length()) sview = fld.toInt();
+          if (idx == 18 && fld.length()) cn0 = fld.toInt();
+          idx++;
+        }
+      }
+    }
+    Serial.print("GPS["); Serial.print(millis() / 1000); Serial.print("s] fix=");
+    Serial.print(fix); Serial.print(" sats_in_view="); Serial.print(sview);
+    Serial.print(" C/N0="); Serial.print(cn0);
+    Serial.print("  raw="); Serial.println(raw.length() ? raw : "<empty>");
+  }
+
+  delay(250);
+}
+#else
 void loop() {
   maintainGps();
 
   const uint32_t nowMs = millis();
+
+  // Modem watchdog: if no successful POST in 10 minutes, power-cycle the modem and reconnect.
+  if (lastPostSuccessMs > 0 && nowMs - lastPostSuccessMs >= POST_WATCHDOG_MS) {
+    Serial.println("POST watchdog triggered — power cycling modem");
+    lastPostSuccessMs = millis();  // reset so we don't loop immediately
+    modem.gprsDisconnect();
+    delay(1000);
+    powerOnModem();
+    delay(5000);
+    waitForModem();
+    modem.gprsConnect(TRACKER_APN_PRIMARY, TRACKER_GPRS_USER, TRACKER_GPRS_PASS);
+    gprsConnected = modem.isGprsConnected();
+    Serial.println(gprsConnected ? "Reconnected after watchdog" : "Reconnect failed — will retry");
+  }
+
+  // Refresh BLE device-info characteristic with latest battery reading every 30s.
+  static uint32_t lastBleUpdateMs = 0;
+  if (nowMs - lastBleUpdateMs >= 30000UL) {
+    lastBleUpdateMs = nowMs;
+    updateBleDevInfo();
+  }
+
   if (lastTelemetryMs == 0 || nowMs - lastTelemetryMs >= nextIntervalMs()) {
     lastTelemetryMs = nowMs;
     const String payload = buildTelemetry();
@@ -772,9 +1786,16 @@ void loop() {
       Serial.println("Queueing telemetry");
       enqueue(payload);
     } else {
+      lastPostSuccessMs = millis();
       flushQueue();
+      telemetryCycleCount++;
+      if (telemetryCycleCount >= 5) {
+        telemetryCycleCount = 0;
+        checkOtaStandalone();
+      }
     }
   }
 
   delay(250);
 }
+#endif  // GPS_ISOLATION_TEST
