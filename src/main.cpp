@@ -333,8 +333,8 @@ bool sendGnssNmea(const char* sentence) {
 // Configures the GNSS engine after power-on: enables GLONASS alongside GPS,
 // SBAS/WAAS differential corrections, and bumps the update rate to 2 Hz.
 void configureGnss() {
-  Serial.println("GNSS: configuring multi-constellation + SBAS + 2 Hz...");
-  sendGnssNmea("$PMTK353,1,1,0,0,1");  // GPS + GLONASS + BeiDou (valid: Galileo off, Galileo-full off)
+  Serial.println("GNSS: configuring GPS+GLONASS + SBAS + 2 Hz...");
+  sendGnssNmea("$PMTK353,1,1,0,0,0");  // GPS + GLONASS only (matches CGNSMOD; all-4 hurts TTFF on SIM7000G)
   delay(100);
   sendGnssNmea("$PMTK313,1");           // Enable SBAS search
   sendGnssNmea("$PMTK301,2");           // SBAS integrity mode (WAAS / EGNOS)
@@ -628,6 +628,21 @@ void injectSavedPosition() {
   sendGnssNmea(sentence);
 }
 
+// Routine GNSS enables must NEVER wipe aiding data. A $PMTK104 (full cold start)
+// erases ephemeris/almanac/EPO/last-position and forces a hemisphere-wide search —
+// the root cause of perpetual no-lock. We gate the factory reset behind a one-shot
+// NVS flag, used only as explicit recovery from a suspected-corrupt GNSS NVRAM
+// config. Set bool "factory_reset"=true in the "gnss" namespace to request one;
+// it clears itself after running a single time.
+bool consumeGnssFactoryResetRequest() {
+  Preferences prefs;
+  prefs.begin("gnss", false);
+  const bool requested = prefs.getBool("factory_reset", false);
+  if (requested) prefs.putBool("factory_reset", false);  // one-shot
+  prefs.end();
+  return requested;
+}
+
 void ensureGps() {
   if (gpsEnabled) {
     return;
@@ -641,24 +656,25 @@ void ensureGps() {
     lastGnssStatusLogMs = 0;
     gpsFirstFixMs = 0;
 
-    // One-time factory reset clears any corrupted GNSS config persisted in the
-    // module's own NVRAM (a malformed earlier $PMTK353 could have done this),
-    // then we re-apply the FULL config below.
-    delay(300);
-    sendGnssNmea("$PMTK104");      // factory reset GNSS core
-    delay(1500);
-
-    // FULL GPS FEATURE SET (restored):
+    // Power receiver + active antenna and pick a reliable constellation set first.
+    // GPS+GLONASS is what the SIM7000G locks most reliably; enabling all four
+    // (adding BeiDou+Galileo) degrades acquisition on this chip.
     sendVerboseAt("+CGNSPWR=1", 3000);          // receiver + ACTIVE ANTENNA power
-    sendVerboseAt("+CGNSMOD=1,1,1,1", 3000);    // GPS+GLONASS+BeiDou+Galileo coverage
+    sendVerboseAt("+CGNSMOD=1,1,0,0", 3000);    // GPS + GLONASS
     sendVerboseAt("+CVAUXS=1", 2000);           // aux supply on
     delay(200);
-    // Hot start from cached AGPS (LTE-assisted) predictions if recent.
-    if (lastAgpsMs > 0 && millis() - lastAgpsMs < 21600000UL) {
-      sendGnssNmea("$PMTK101");
+
+    // Explicit, gated recovery ONLY — never wipe aiding data on a routine enable.
+    if (consumeGnssFactoryResetRequest()) {
+      Serial.println("GNSS: one-time factory reset requested — clearing NVRAM config");
+      sendGnssNmea("$PMTK104");   // full cold start; wipes ephemeris/EPO/position
+      delay(1500);
     }
-    configureGnss();              // SBAS/WAAS + EPO + update rate
-    injectSavedPosition();        // warm-start hint from NVS
+
+    configureGnss();              // constellation/SBAS/EPO NMEA cfg + update rate
+    injectSavedPosition();        // warm-start position+time hint from NVS (PMTK740)
+    // EPO (AT+CAGPS) + injected position/time are now in place, so the engine
+    // performs a fast aided/warm start rather than a cold hemisphere-wide search.
   }
 }
 
@@ -1702,8 +1718,10 @@ void setup() {
 
   logSimDiagnostics();
   connectGprs();
-  downloadAgps();
+  // Power the GNSS receiver BEFORE pulling A-GPS, so AT+CAGPS injects EPO
+  // predictions into a live engine (and they are no longer wiped by a reset).
   ensureGps();
+  downloadAgps();
 }
 
 // ─── GPS ISOLATION TEST ──────────────────────────────────────────────────────
@@ -1711,7 +1729,7 @@ void setup() {
 // can see, directly off the chip, whether GPS acquires satellites with cellular
 // quiet. If sats/C-N0 climb here but not in normal operation, the cellular data
 // session was starving GPS. Remove this block to restore normal operation.
-#define GPS_ISOLATION_TEST 1
+#define GPS_ISOLATION_TEST 0
 #if GPS_ISOLATION_TEST
 void loop() {
   maintainGps();   // keeps GNSS powered + configured (CGNSPWR/CGNSMOD/etc.)
