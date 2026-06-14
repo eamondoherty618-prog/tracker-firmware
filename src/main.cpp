@@ -659,9 +659,9 @@ void ensureGps() {
     // Power receiver + active antenna and pick a reliable constellation set first.
     // GPS+GLONASS is what the SIM7000G locks most reliably; enabling all four
     // (adding BeiDou+Galileo) degrades acquisition on this chip.
-    sendVerboseAt("+CGNSPWR=1", 3000);          // receiver + ACTIVE ANTENNA power
+    sendVerboseAt("+CGNSPWR=1", 3000);          // power the GNSS receiver
     sendVerboseAt("+CGNSMOD=1,1,0,0", 3000);    // GPS + GLONASS
-    sendVerboseAt("+CVAUXS=1", 2000);           // aux supply on
+    sendVerboseAt("+CGPIO=0,48,1,1", 2000);     // drive modem GPIO4 HIGH = power the ACTIVE GPS antenna LDO (T-SIM7000G)
     delay(200);
 
     // Explicit, gated recovery ONLY — never wipe aiding data on a routine enable.
