@@ -89,6 +89,10 @@ void powerOnModem() {
   delay(3000);
 }
 
+// Forward declaration — defined later, but needed here to disable modem sleep
+// the moment the modem first responds (both at boot and after a watchdog reset).
+bool sendSimpleAt(const String& command, uint32_t timeoutMs);
+
 bool waitForModem() {
   Serial.print("Waiting for modem");
   for (int attempt = 0; attempt < 20; attempt++) {
