@@ -94,6 +94,10 @@ bool waitForModem() {
   for (int attempt = 0; attempt < 20; attempt++) {
     if (modem.testAT(1000)) {
       Serial.println(" ok");
+      // Disable all modem power-saving modes — the SIM7000G and 1NCE network
+      // can negotiate PSM / UART sleep, making the modem unreachable mid-drive.
+      sendSimpleAt("+CSCLK=0", 3000);   // disable UART sleep
+      sendSimpleAt("+CPSMS=0", 3000);   // disable PSM (network power saving)
       return true;
     }
     Serial.print(".");
@@ -1783,6 +1787,7 @@ void loop() {
     powerOnModem();
     delay(5000);
     waitForModem();
+    gpsEnabled = false;  // modem restart resets GNSS; force ensureGps() to re-init
     modem.gprsConnect(TRACKER_APN_PRIMARY, TRACKER_GPRS_USER, TRACKER_GPRS_PASS);
     gprsConnected = modem.isGprsConnected();
     Serial.println(gprsConnected ? "Reconnected after watchdog" : "Reconnect failed — will retry");
