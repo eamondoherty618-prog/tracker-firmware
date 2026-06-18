@@ -1065,6 +1065,9 @@ bool postJson(const String& body) {
   request += "\r\nUser-Agent: "; request += trackerDeviceId();
   request += "/"; request += TRACKER_FIRMWARE_VERSION;
   request += "\r\nx-tracker-key: "; request += trackerApiKey();
+  // keep-alive so the server holds the socket open long enough for us to read the
+  // response (the SIM7000G drops the RX buffer if the peer closes first). We never
+  // REUSE the socket though — secureClient.stop() below forces a fresh one each POST.
   request += "\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: ";
   request += body.length();
   request += "\r\n\r\n";
@@ -1125,6 +1128,10 @@ bool postJson(const String& body) {
     }
   }
 
+  // Always drop the socket so the NEXT POST opens a fresh one. Reusing a kept-alive
+  // socket the server had already closed made every other POST hang for the full 15s
+  // timeout and re-queue, stalling telemetry on the road.
+  secureClient.stop();
   return success;
 }
 
