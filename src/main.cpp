@@ -49,8 +49,13 @@ size_t queueCount = 0;
 
 uint32_t lastTelemetryMs = 0;
 uint32_t lastPostSuccessMs = 0;  // watchdog: reset on every confirmed POST
-constexpr uint32_t POST_WATCHDOG_MS = 3UL * 60UL * 1000UL;   // 3 minutes
+constexpr uint32_t POST_WATCHDOG_MS = 90UL * 1000UL;   // 90s — recover fast from dead data sessions
 uint8_t telemetryCycleCount = 0;
+// Diagnostics surfaced in telemetry so we can see what happens mid-drive without a serial cable.
+uint8_t g_consecutivePostFails = 0;   // resets on success
+uint16_t g_watchdogCount = 0;         // times the POST watchdog power-cycled the modem
+uint16_t g_forcedReconnects = 0;      // times GPRS was torn down after repeated post fails
+uint32_t g_bootCount = 0;             // persisted across reboots (NVS) — detects brownout/crash resets
 uint32_t lastSpeedSampleMs = 0;
 float lastSpeedKph = NAN;
 bool gpsEnabled = false;
@@ -76,6 +81,12 @@ constexpr float STATIONARY_SPEED_KPH = 2.0f;      // below this = stationary
 uint32_t lastAgpsMs = 0;
 uint32_t gpsFirstFixMs = 0;
 bool ignitionOn = false;  // true when alternator voltage detected
+uint32_t ignitionOffSinceMs = 0;  // millis() when ignition last went off (0 = on/unknown)
+// Smart-sleep: once the engine's been off this long, drop to a slow heartbeat. The
+// heartbeat stays well under the app's 35-min offline cutoff, so the vehicle keeps
+// showing "parked" (not "offline") while it sits, at ~5x less parked power/data.
+constexpr uint32_t DEEP_PARK_AFTER_MS = 10UL * 60UL * 1000UL;
+constexpr uint32_t PARKED_HEARTBEAT_MS = 10UL * 60UL * 1000UL;
 uint16_t g_lastBattMv = 0;
 BLECharacteristic* g_bleDevInfoChar = nullptr;
 
@@ -1056,7 +1067,6 @@ bool postJson(const String& body) {
 
   connectGprs();
   if (!gprsConnected) return false;
-  if (!ensureClientConnected()) return false;
 
   String request;
   request.reserve(body.length() + 300);
@@ -1065,20 +1075,23 @@ bool postJson(const String& body) {
   request += "\r\nUser-Agent: "; request += trackerDeviceId();
   request += "/"; request += TRACKER_FIRMWARE_VERSION;
   request += "\r\nx-tracker-key: "; request += trackerApiKey();
-  // keep-alive so the server holds the socket open long enough for us to read the
-  // response (the SIM7000G drops the RX buffer if the peer closes first). We never
-  // REUSE the socket though — secureClient.stop() below forces a fresh one each POST.
   request += "\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: ";
   request += body.length();
   request += "\r\n\r\n";
   request += body;
 
+  // NOTE: the SIM7000G's raw TLS sockets drop ~half of HTTPS responses at this cadence
+  // in clustered ~20-60s windows, regardless of fresh-vs-reuse/timing/retries (all
+  // measured). The real fix is the modem's native HTTPS client (AT+SHREQ); until then
+  // we keep this simple fresh-socket post and lean on the escalating auto-restart in
+  // loop() to self-heal the sustained freezes.
+  if (!ensureClientConnected()) return false;
+
   secureClient.print(request);
 
-  // Read response with timeout — reset on each byte received.
   String response;
   response.reserve(512);
-  uint32_t deadline = millis() + 15000;
+  uint32_t deadline = millis() + 8000;
   while (millis() < deadline) {
     while (secureClient.available()) {
       response += (char)secureClient.read();
@@ -1087,10 +1100,10 @@ bool postJson(const String& body) {
     if (!secureClient.connected() && !secureClient.available()) break;
     delay(10);
   }
+  secureClient.stop();  // fresh socket next post
 
   if (response.length() == 0) {
-    Serial.println("HTTP: no response — dropping connection");
-    secureClient.stop();
+    Serial.println("HTTP: no response");
     return false;
   }
 
@@ -1112,7 +1125,6 @@ bool postJson(const String& body) {
       const char* otaMd5 = respDoc["ota"]["md5"] | "";
       if (strlen(otaVer) > 0 && semverGt(String(otaVer), String(TRACKER_FIRMWARE_VERSION))) {
         Serial.print("OTA available: v"); Serial.println(otaVer);
-        secureClient.stop();
         downloadAndApplyOta(String(otaVer), otaSize, String(otaMd5));
       }
       if (!lastGpsQualityFix && !respDoc["wifi_location"]["lat"].isNull()) {
@@ -1127,11 +1139,6 @@ bool postJson(const String& body) {
       }
     }
   }
-
-  // Always drop the socket so the NEXT POST opens a fresh one. Reusing a kept-alive
-  // socket the server had already closed made every other POST hang for the full 15s
-  // timeout and re-queue, stalling telemetry on the road.
-  secureClient.stop();
   return success;
 }
 
@@ -1320,10 +1327,17 @@ String buildTelemetry() {
   // Ignition detection: alternator charges at 13.2–14.4V; battery-only is below 12.8V.
   // Hysteresis: latch ON above IGNITION_ON_MV, latch OFF below IGNITION_OFF_MV.
   // Zero means the voltage read failed — keep previous state rather than flipping.
+  const bool wasIgnitionOn = ignitionOn;
   if (batteryMv >= TRACKER_IGNITION_ON_MV) {
     ignitionOn = true;
   } else if (batteryMv > 0 && batteryMv < TRACKER_IGNITION_OFF_MV) {
     ignitionOn = false;
+  }
+  // Track how long the engine's been off so nextIntervalMs() can drop to a heartbeat.
+  if (ignitionOn) {
+    ignitionOffSinceMs = 0;
+  } else if (wasIgnitionOn || ignitionOffSinceMs == 0) {
+    ignitionOffSinceMs = millis();
   }
 
   // Collect cell tower identity when no quality fix — sent to server for geolocation.
@@ -1362,6 +1376,14 @@ String buildTelemetry() {
   doc["cell_rssi"] = rssi;
   doc["battery_mv"] = batteryMv;
   doc["queued_messages"] = queueCount;
+  // Connectivity diagnostics — let the server show what happened during a mid-drive
+  // stall without a serial cable. boot_count jumps on a brownout/crash reset;
+  // watchdog/forced_reconnect counts climb when the data session dies (handovers);
+  // free_heap falling over time would point at a memory leak.
+  doc["free_heap"] = ESP.getFreeHeap();
+  doc["boot_count"] = g_bootCount;
+  doc["watchdog_count"] = g_watchdogCount;
+  doc["forced_reconnects"] = g_forcedReconnects;
 
   if (eventName.length() > 0) {
     doc["event"] = eventName;
@@ -1444,7 +1466,14 @@ String buildTelemetry() {
 uint32_t nextIntervalMs() {
   if (!lastGpsQualityFix) return TRACKER_MOVING_INTERVAL_MS;  // seeking fix — stay fast
   if (isnan(lastSpeedKph) || lastSpeedKph < TRACKER_MIN_MOVING_SPEED_KPH) {
-    return ignitionOn ? 30000UL : TRACKER_PARKED_INTERVAL_MS;  // idle engine: 30s, off: 120s
+    if (ignitionOn) return 30000UL;  // idle engine: 30s
+    // Parked: 2-min beacon normally; drop to a 10-min heartbeat once the engine's
+    // been off a while (smart sleep). Still << the 35-min offline cutoff, so the map
+    // keeps showing "parked".
+    if (ignitionOffSinceMs != 0 && millis() - ignitionOffSinceMs >= DEEP_PARK_AFTER_MS) {
+      return PARKED_HEARTBEAT_MS;
+    }
+    return TRACKER_PARKED_INTERVAL_MS;  // 2 min
   }
   // Adaptive: faster updates at highway speeds for accurate trip reconstruction.
   if (lastSpeedKph >= 80.0f) return 5000UL;   // highway: 5s
@@ -1696,6 +1725,17 @@ void setup() {
   Serial.println();
   Serial.println("Fleet tracker booting");
 
+  // Persisted boot counter — if this climbs in telemetry, the board is resetting
+  // (brownout/crash) rather than just losing the data session.
+  {
+    Preferences prefs;
+    prefs.begin("diag", false);
+    g_bootCount = prefs.getULong("boots", 0) + 1;
+    prefs.putULong("boots", g_bootCount);
+    prefs.end();
+    Serial.print("Boot count: "); Serial.println(g_bootCount);
+  }
+
   loadCredentials();
   // BLE advertising is setup-only (claiming a new tracker). Provisioned trackers
   // MUST skip it: BLE and WiFi share the ESP32's 2.4GHz radio, and running BLE
@@ -1789,20 +1829,8 @@ void loop() {
 
   const uint32_t nowMs = millis();
 
-  // Modem watchdog: if no successful POST in 10 minutes, power-cycle the modem and reconnect.
-  if (lastPostSuccessMs > 0 && nowMs - lastPostSuccessMs >= POST_WATCHDOG_MS) {
-    Serial.println("POST watchdog triggered — power cycling modem");
-    lastPostSuccessMs = millis();  // reset so we don't loop immediately
-    modem.gprsDisconnect();
-    delay(1000);
-    powerOnModem();
-    delay(5000);
-    waitForModem();
-    gpsEnabled = false;  // modem restart resets GNSS; force ensureGps() to re-init
-    modem.gprsConnect(TRACKER_APN_PRIMARY, TRACKER_GPRS_USER, TRACKER_GPRS_PASS);
-    gprsConnected = modem.isGprsConnected();
-    Serial.println(gprsConnected ? "Reconnected after watchdog" : "Reconnect failed — will retry");
-  }
+  // Recovery is driven by consecutive POST failures below (interval-agnostic, so it
+  // never fights the long parked-heartbeat interval the way a fixed-time watchdog did).
 
   // Refresh BLE device-info characteristic with latest battery reading every 30s.
   static uint32_t lastBleUpdateMs = 0;
@@ -1811,7 +1839,10 @@ void loop() {
     updateBleDevInfo();
   }
 
-  if (lastTelemetryMs == 0 || nowMs - lastTelemetryMs >= nextIntervalMs()) {
+  // While posts are failing, retry fast — don't wait out a long parked-heartbeat
+  // interval. When healthy, use the normal adaptive interval.
+  const uint32_t interval = (g_consecutivePostFails > 0) ? 15000UL : nextIntervalMs();
+  if (lastTelemetryMs == 0 || nowMs - lastTelemetryMs >= interval) {
     lastTelemetryMs = nowMs;
     const String payload = buildTelemetry();
 
@@ -1819,8 +1850,36 @@ void loop() {
     if (!postJson(payload)) {
       Serial.println("Queueing telemetry");
       enqueue(payload);
+      g_consecutivePostFails++;
+      // Escalating recovery — fastest action first. postJson already retries the SSL
+      // socket internally, so reaching here means a real outage (dead PDP context, lost
+      // registration, or a wedged modem). Each step does what a human would, ending in
+      // the full restart that the field symptom needs — but automatically.
+      if (g_consecutivePostFails == 3) {
+        Serial.println("3 fails — fresh GPRS session");
+        g_forcedReconnects++;
+        modem.gprsDisconnect();
+        gprsConnected = false;
+        delay(500);
+      } else if (g_consecutivePostFails == 8) {
+        Serial.println("8 fails — power-cycling modem");
+        g_watchdogCount++;
+        modem.gprsDisconnect();
+        delay(1000);
+        powerOnModem();
+        delay(5000);
+        waitForModem();
+        gpsEnabled = false;  // modem restart resets GNSS
+        modem.gprsConnect(TRACKER_APN_PRIMARY, TRACKER_GPRS_USER, TRACKER_GPRS_PASS);
+        gprsConnected = modem.isGprsConnected();
+      } else if (g_consecutivePostFails >= 15) {
+        Serial.println("15 fails — full reboot to recover (auto-restart)");
+        delay(200);
+        ESP.restart();
+      }
     } else {
       lastPostSuccessMs = millis();
+      g_consecutivePostFails = 0;
       flushQueue();
       telemetryCycleCount++;
       if (telemetryCycleCount >= 5) {
