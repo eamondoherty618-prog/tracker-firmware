@@ -90,6 +90,14 @@ constexpr uint32_t PARKED_HEARTBEAT_MS = 10UL * 60UL * 1000UL;
 uint16_t g_lastBattMv = 0;
 BLECharacteristic* g_bleDevInfoChar = nullptr;
 
+// Hardware loop watchdog — reboots the board if the main loop stops making progress
+// (e.g. a blocking call like WiFi.scanNetworks() or a modem read hangs). The software
+// recovery can't help a HUNG loop because it only runs when postJson() returns; this
+// timer ISR fires independently and forces a reboot. (Field freeze: stopped posting
+// mid-drive with watchdog_count=0, forced_reconnects=0, no reboot = loop was hung.)
+hw_timer_t* g_loopWdt = nullptr;
+volatile uint32_t g_loopBeat = 0;
+
 void powerOnModem() {
   pinMode(MODEM_PWRKEY, OUTPUT);
   digitalWrite(MODEM_PWRKEY, HIGH);
@@ -1327,8 +1335,12 @@ String buildTelemetry() {
   const uint32_t gnssRunMs = gpsEnabledAtMs ? (nowMsWifi - gpsEnabledAtMs) : 0;
   // Suppress WiFi entirely for the first 5 min of GPS acquisition.
   const bool suppressForGpsAcq = gpsAcquiring && gnssRunMs < 300000UL;
-  const uint32_t wifiInterval = qualityFix ? 300000UL : 300000UL;  // 5 min either way now
-  if (!suppressForGpsAcq && (lastWifiScanMs == 0 || nowMsWifi - lastWifiScanMs >= wifiInterval)) {
+  // Only scan WiFi when we DON'T have a quality GPS fix — it's purely a geolocation
+  // fallback. WiFi.scanNetworks() is blocking and can hang the WHOLE loop (the
+  // mid-drive freeze: stuck with no posts, no recovery, no reboot). With a good fix
+  // it's unneeded, so skip it entirely while driving.
+  if (qualityFix) lastWifiScanMs = nowMsWifi;  // keep timer fresh so we don't scan the instant a fix drops
+  if (!qualityFix && !suppressForGpsAcq && (lastWifiScanMs == 0 || nowMsWifi - lastWifiScanMs >= 300000UL)) {
     lastWifiScanMs = nowMsWifi;
     wifiScanJson = scanWifi();
     drainSerialAt(); // clear URCs that piled up during the blocking WiFi scan
@@ -1734,6 +1746,22 @@ void startBleAdvertising() {
   Serial.println("BLE: advertising as 123Track");
 }
 
+// Fires every 60s. If the loop heartbeat hasn't advanced across 3 checks (~180s),
+// the main loop is hung — force a reboot. 180s clears the longest legit blocking
+// call (waitForNetwork is 120s) so it won't false-trip.
+void IRAM_ATTR onLoopWatchdog() {
+  static uint32_t last = 0;
+  static uint8_t misses = 0;
+  if (g_loopBeat == last) {
+    if (++misses >= 3) {
+      esp_restart();
+    }
+  } else {
+    misses = 0;
+    last = g_loopBeat;
+  }
+}
+
 }  // namespace
 
 void setup() {
@@ -1752,6 +1780,13 @@ void setup() {
     prefs.end();
     Serial.print("Boot count: "); Serial.println(g_bootCount);
   }
+
+  // Hardware loop watchdog: reboot if the main loop hangs (timer 0, 1 MHz tick,
+  // fires every 60s; reboots after ~180s of no loop progress).
+  g_loopWdt = timerBegin(0, 80, true);
+  timerAttachInterrupt(g_loopWdt, &onLoopWatchdog, true);
+  timerAlarmWrite(g_loopWdt, 60000000ULL, true);
+  timerAlarmEnable(g_loopWdt);
 
   loadCredentials();
   // BLE advertising is setup-only (claiming a new tracker). Provisioned trackers
@@ -1842,6 +1877,7 @@ void loop() {
 }
 #else
 void loop() {
+  g_loopBeat++;  // feed the hardware loop watchdog (reboots if this stops advancing)
   maintainGps();
 
   const uint32_t nowMs = millis();
