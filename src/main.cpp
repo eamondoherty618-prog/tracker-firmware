@@ -729,7 +729,24 @@ void maintainGps() {
   const uint32_t nowMs = millis();
   if (lastGnssStatusLogMs == 0 || nowMs - lastGnssStatusLogMs >= TRACKER_GNSS_STATUS_LOG_MS) {
     lastGnssStatusLogMs = nowMs;
-    logGnssStatus();
+    const String raw = modem.getGPSraw();
+    Serial.print("GNSS raw: ");
+    Serial.println(raw.length() ? raw : "<empty>");
+    // enableGPS() can report success while the engine never actually starts (CGNSINF
+    // run-status field stays 0) — especially after a modem power-cycle — leaving GNSS
+    // stuck off forever since ensureGps() early-returns on gpsEnabled. Detect the
+    // engine-off state and re-kick it (CGNSPWR off->on) instead of waiting 30 min.
+    static uint8_t gnssOffStreak = 0;
+    if (raw.length() > 0 && raw[0] == '0') {
+      if (++gnssOffStreak >= 2) {
+        Serial.println("GNSS engine reported OFF while enabled — re-kicking");
+        gnssOffStreak = 0;
+        restartGps();
+        return;
+      }
+    } else {
+      gnssOffStreak = 0;
+    }
   }
 
   // Refresh AGPS every 24h regardless of fix status — keeps satellite predictions fresh.

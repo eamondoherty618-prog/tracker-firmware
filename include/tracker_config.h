@@ -20,7 +20,7 @@
 #ifndef TRACKER_API_KEY
 #define TRACKER_API_KEY "c5cc56a23546eb487223fe810ae8a8b76d83376ee09140f7"
 #endif
-#define TRACKER_FIRMWARE_VERSION "0.9.26"
+#define TRACKER_FIRMWARE_VERSION "0.9.27"
 
 // Ignition detection via alternator voltage.
 // Above ON threshold = engine running (alternator charging ~13.8V).
