@@ -1034,8 +1034,25 @@ String scanWifi() {
   WiFi.disconnect();
   delay(100);
 
-  const int n = WiFi.scanNetworks(false, false); // blocking, no hidden
-  if (n <= 0) {
+  // ASYNC scan + bounded poll. A blocking WiFi.scanNetworks() can wedge the entire
+  // main loop indefinitely (the mid-drive freeze). Start it async and abandon after
+  // 8s so it can NEVER hang. Feed the loop watchdog while we wait.
+  WiFi.scanNetworks(true /*async*/, false /*hidden*/);
+  const uint32_t deadline = millis() + 8000;
+  int n = WIFI_SCAN_RUNNING;
+  while (millis() < deadline) {
+    n = WiFi.scanComplete();
+    if (n != WIFI_SCAN_RUNNING) break;  // done (>=0) or failed (-2)
+    g_loopBeat++;
+    delay(100);
+  }
+  if (n < 0) {  // still running (timed out) or failed
+    WiFi.scanDelete();
+    WiFi.mode(WIFI_OFF);
+    Serial.println("WiFi scan: timed out/failed — skipping");
+    return "[]";
+  }
+  if (n == 0) {
     WiFi.mode(WIFI_OFF);
     Serial.println("WiFi scan: no networks found");
     return "[]";
