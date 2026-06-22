@@ -20,7 +20,7 @@
 #ifndef TRACKER_API_KEY
 #define TRACKER_API_KEY "c5cc56a23546eb487223fe810ae8a8b76d83376ee09140f7"
 #endif
-#define TRACKER_FIRMWARE_VERSION "0.9.29"
+#define TRACKER_FIRMWARE_VERSION "0.9.31"
 
 // Ignition detection via alternator voltage.
 // Above ON threshold = engine running (alternator charging ~13.8V).
@@ -31,7 +31,7 @@
 // Tuning knobs.
 #define TRACKER_MOVING_INTERVAL_MS 10000UL
 #define TRACKER_PARKED_INTERVAL_MS 120000UL
-#define TRACKER_MIN_MOVING_SPEED_KPH 6.0f
+#define TRACKER_MIN_MOVING_SPEED_KPH 3.0f
 #define TRACKER_HARD_BRAKE_DELTA_KPH -22.0f
 #define TRACKER_RAPID_ACCEL_DELTA_KPH 22.0f
 #define TRACKER_EVENT_WINDOW_MS 12000UL

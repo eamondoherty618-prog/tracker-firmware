@@ -98,6 +98,15 @@ BLECharacteristic* g_bleDevInfoChar = nullptr;
 hw_timer_t* g_loopWdt = nullptr;
 volatile uint32_t g_loopBeat = 0;
 
+// Hang breadcrumb — records the operation currently running in RTC memory (survives a
+// software/watchdog reset). On the next boot we read what it was doing when it hung,
+// plus the reset reason, and report both in telemetry to pinpoint the freeze source.
+RTC_NOINIT_ATTR char g_breadcrumb[24];
+RTC_NOINIT_ATTR uint32_t g_breadcrumbMagic;
+char g_lastHangOp[24] = "";     // breadcrumb from before the last reset (reported once)
+const char* g_resetReason = ""; // why the board last reset (sw/panic/brownout/poweron)
+#define CRUMB(s) do { strncpy(g_breadcrumb, (s), sizeof(g_breadcrumb) - 1); g_breadcrumb[sizeof(g_breadcrumb) - 1] = 0; } while (0)
+
 void powerOnModem() {
   pinMode(MODEM_PWRKEY, OUTPUT);
   digitalWrite(MODEM_PWRKEY, HIGH);
@@ -461,7 +470,10 @@ bool ensureNetwork() {
   Serial.print(" reg=");
   Serial.println(static_cast<int>(modem.getRegistrationStatus()));
 
-  const bool connected = modem.waitForNetwork(120000L, true);
+  CRUMB("waitNet");
+  // 25s (was 120s) — a shorter block means a coverage blip is a brief gap, and the
+  // loop cycles back to retry/recover faster instead of sitting dark for two minutes.
+  const bool connected = modem.waitForNetwork(25000L, true);
   Serial.print("Network wait result: ");
   Serial.println(connected ? "connected" : "not registered");
   if (connected) {
@@ -512,6 +524,7 @@ struct CellInfo {
 
 // Reads AT+CPSI? and parses fields: mode, MCC-MNC (f2), TAC/LAC (f3), Cell ID (f4).
 CellInfo getCellInfo() {
+  CRUMB("cellInfo");
   CellInfo info;
   drainSerialAt();
   SerialAT.print("AT+CPSI?\r\n");
@@ -571,6 +584,7 @@ CellInfo getCellInfo() {
 // GPRS connection. Reduces cold-start TTFF from ~10 min to under 30 seconds.
 bool downloadAgps() {
   if (!gprsConnected) return false;
+  CRUMB("agps");
   Serial.println("AGPS: fetching assistance data...");
   drainSerialAt();
   SerialAT.print("AT+CAGPS\r\n");
@@ -773,6 +787,9 @@ String motionState(float speedKph) {
   if (isnan(speedKph)) {
     return "unknown";
   }
+  // Engine running = on a trip, even when momentarily stopped (red light, stop-and-go).
+  // Only call it "parked" when the engine is off AND it's below the moving threshold.
+  if (ignitionOn) return "moving";
   return speedKph >= TRACKER_MIN_MOVING_SPEED_KPH ? "moving" : "parked";
 }
 
@@ -1030,6 +1047,7 @@ void downloadAndApplyOta(const String& version, int sizeHint, const String& md5 
 // {ssid, bssid, rssi} objects (up to 10 strongest), or "[]" on failure.
 // Puts the radio to sleep again when done.
 String scanWifi() {
+  CRUMB("wifiScan");
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
   delay(100);
@@ -1091,6 +1109,7 @@ bool ensureClientConnected() {
   sendSimpleAt("+CASSLCFG=0,protocol,0", 5000);
 
   Serial.println("TLS: connecting...");
+  CRUMB("tlsConnect");
   if (!secureClient.connect(TRACKER_SERVER_HOST, TRACKER_SERVER_PORT)) {
     Serial.println("TLS: connect failed");
     return false;
@@ -1131,6 +1150,7 @@ bool postJson(const String& body) {
 
   secureClient.print(request);
 
+  CRUMB("httpRead");
   String response;
   response.reserve(512);
   uint32_t deadline = millis() + 8000;
@@ -1430,6 +1450,8 @@ String buildTelemetry() {
   doc["boot_count"] = g_bootCount;
   doc["watchdog_count"] = g_watchdogCount;
   doc["forced_reconnects"] = g_forcedReconnects;
+  doc["reset_reason"] = g_resetReason;                       // why it last reset
+  if (g_lastHangOp[0]) doc["last_hang_op"] = g_lastHangOp;   // what it was doing when it hung
 
   if (eventName.length() > 0) {
     doc["event"] = eventName;
@@ -1787,6 +1809,31 @@ void setup() {
   Serial.println();
   Serial.println("Fleet tracker booting");
 
+  // Capture WHY we reset + WHAT we were doing when we hung (breadcrumb survives a
+  // software/watchdog reset in RTC memory). Reported in telemetry to find the freeze.
+  {
+    const esp_reset_reason_t r = esp_reset_reason();
+    switch (r) {
+      case ESP_RST_POWERON:  g_resetReason = "poweron"; break;
+      case ESP_RST_SW:       g_resetReason = "sw(watchdog)"; break;  // our timer ISR esp_restart()
+      case ESP_RST_PANIC:    g_resetReason = "panic(crash)"; break;
+      case ESP_RST_INT_WDT:  g_resetReason = "int_wdt"; break;
+      case ESP_RST_TASK_WDT: g_resetReason = "task_wdt"; break;
+      case ESP_RST_WDT:      g_resetReason = "other_wdt"; break;
+      case ESP_RST_BROWNOUT: g_resetReason = "brownout(power)"; break;
+      case ESP_RST_DEEPSLEEP: g_resetReason = "deepsleep"; break;
+      default:               g_resetReason = "other"; break;
+    }
+    if (g_breadcrumbMagic == 0xB00B1E5UL && r != ESP_RST_POWERON) {
+      strncpy(g_lastHangOp, g_breadcrumb, sizeof(g_lastHangOp) - 1);
+      g_lastHangOp[sizeof(g_lastHangOp) - 1] = 0;
+    }
+    g_breadcrumbMagic = 0xB00B1E5UL;
+    CRUMB("boot");
+    Serial.print("Reset reason: "); Serial.print(g_resetReason);
+    Serial.print(" | last op before reset: "); Serial.println(g_lastHangOp[0] ? g_lastHangOp : "(none)");
+  }
+
   // Persisted boot counter — if this climbs in telemetry, the board is resetting
   // (brownout/crash) rather than just losing the data session.
   {
@@ -1895,6 +1942,7 @@ void loop() {
 #else
 void loop() {
   g_loopBeat++;  // feed the hardware loop watchdog (reboots if this stops advancing)
+  CRUMB("maintainGps");
   maintainGps();
 
   const uint32_t nowMs = millis();
@@ -1909,14 +1957,32 @@ void loop() {
     updateBleDevInfo();
   }
 
+  // Wake-on-engine-start: while parked the telemetry interval stretches to a 10-min
+  // heartbeat, so check the alternator voltage directly every 15s. When the engine
+  // starts, jump straight to live tracking instead of waiting out the heartbeat.
+  static uint32_t lastWakeCheckMs = 0;
+  if (!ignitionOn && nowMs - lastWakeCheckMs >= 15000UL) {
+    lastWakeCheckMs = nowMs;
+    CRUMB("wakeBatt");
+    const uint16_t mv = modem.getBattVoltage();
+    if (mv >= TRACKER_IGNITION_ON_MV) {
+      Serial.println("Engine started while parked — waking to live tracking");
+      ignitionOn = true;
+      ignitionOffSinceMs = 0;
+      lastTelemetryMs = 0;  // post immediately
+    }
+  }
+
   // While posts are failing, retry fast — don't wait out a long parked-heartbeat
   // interval. When healthy, use the normal adaptive interval.
   const uint32_t interval = (g_consecutivePostFails > 0) ? 15000UL : nextIntervalMs();
   if (lastTelemetryMs == 0 || nowMs - lastTelemetryMs >= interval) {
     lastTelemetryMs = nowMs;
+    CRUMB("buildTelem");
     const String payload = buildTelemetry();
 
     Serial.println(payload);
+    CRUMB("postJson");
     if (!postJson(payload)) {
       Serial.println("Queueing telemetry");
       enqueue(payload);
@@ -1950,15 +2016,18 @@ void loop() {
     } else {
       lastPostSuccessMs = millis();
       g_consecutivePostFails = 0;
+      CRUMB("flushQueue");
       flushQueue();
       telemetryCycleCount++;
       if (telemetryCycleCount >= 5) {
         telemetryCycleCount = 0;
+        CRUMB("otaCheck");
         checkOtaStandalone();
       }
     }
   }
 
+  CRUMB("idle");
   delay(250);
 }
 #endif  // GPS_ISOLATION_TEST
