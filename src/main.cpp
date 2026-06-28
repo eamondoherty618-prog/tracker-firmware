@@ -80,8 +80,9 @@ constexpr uint32_t STATIONARY_LOCK_MS = 30000UL;  // lock after 30s stopped
 constexpr float STATIONARY_SPEED_KPH = 2.0f;      // below this = stationary
 uint32_t lastAgpsMs = 0;
 uint32_t gpsFirstFixMs = 0;
-bool ignitionOn = false;  // true when alternator voltage detected
+bool ignitionOn = false;  // true when on a trip (GPS motion within the grace window)
 uint32_t ignitionOffSinceMs = 0;  // millis() when ignition last went off (0 = on/unknown)
+uint32_t lastMovingMs = 0;        // millis() of the last GPS reading at/above moving speed
 // Smart-sleep: once the engine's been off this long, drop to a slow heartbeat. The
 // heartbeat stays well under the app's 35-min offline cutoff, so the vehicle keeps
 // showing "parked" (not "offline") while it sits, at ~5x less parked power/data.
@@ -822,10 +823,21 @@ String classifyEvent(float speedKph, uint32_t nowMs) {
   lastSpeedKph = speedKph;
   lastSpeedSampleMs = nowMs;
 
-  if (dt <= TRACKER_EVENT_WINDOW_MS && delta <= TRACKER_HARD_BRAKE_DELTA_KPH) {
+  // The two samples must be a sane gap apart: too short = GPS-speed jitter, too long
+  // = they aren't a single braking/accel event. Outside that band, don't classify.
+  if (dt < TRACKER_EVENT_MIN_DT_MS || dt > TRACKER_EVENT_WINDOW_MS) {
+    return "";
+  }
+
+  // Rate, normalised by the ACTUAL gap (kph per second): negative = decel.
+  const float rateKphPerS = delta / (dt / 1000.0f);
+
+  // Require BOTH a steep enough rate AND a meaningful absolute change, so neither a
+  // gentle long coast (low rate) nor a one-sample GPS wiggle (tiny delta) fires.
+  if (rateKphPerS <= TRACKER_HARD_BRAKE_RATE_KPH_S && delta <= -TRACKER_EVENT_MIN_DELTA_KPH) {
     return "hard_brake";
   }
-  if (dt <= TRACKER_EVENT_WINDOW_MS && delta >= TRACKER_RAPID_ACCEL_DELTA_KPH) {
+  if (rateKphPerS >= TRACKER_RAPID_ACCEL_RATE_KPH_S && delta >= TRACKER_EVENT_MIN_DELTA_KPH) {
     return "rapid_accel";
   }
   return "";
@@ -1110,7 +1122,8 @@ bool ensureClientConnected() {
 
   Serial.println("TLS: connecting...");
   CRUMB("tlsConnect");
-  if (!secureClient.connect(TRACKER_SERVER_HOST, TRACKER_SERVER_PORT)) {
+  if (!secureClient.connect(TRACKER_SERVER_HOST, TRACKER_SERVER_PORT,
+                            TRACKER_TLS_CONNECT_TIMEOUT_S)) {
     Serial.println("TLS: connect failed");
     return false;
   }
@@ -1390,16 +1403,17 @@ String buildTelemetry() {
   uint16_t batteryMv = modem.getBattVoltage();
   g_lastBattMv = batteryMv;
 
-  // Ignition detection: alternator charges at 13.2–14.4V; battery-only is below 12.8V.
-  // Hysteresis: latch ON above IGNITION_ON_MV, latch OFF below IGNITION_OFF_MV.
-  // Zero means the voltage read failed — keep previous state rather than flipping.
+  // No alternator-voltage sense on this hardware: a 12V→5V buck powers the board and
+  // AT+CBC (batteryMv) only reads the buffer LiPo (~3.8V), so "ignition" can never be
+  // derived from voltage. Derive trip state from GPS motion instead — moving now, or
+  // moved within the grace window, counts as on-a-trip, so stop-and-go (lights/traffic)
+  // doesn't collapse to the slow parked cadence. batteryMv is still reported for health.
   const bool wasIgnitionOn = ignitionOn;
-  if (batteryMv >= TRACKER_IGNITION_ON_MV) {
-    ignitionOn = true;
-  } else if (batteryMv > 0 && batteryMv < TRACKER_IGNITION_OFF_MV) {
-    ignitionOn = false;
+  if (!isnan(speedKph) && speedKph >= TRACKER_MIN_MOVING_SPEED_KPH) {
+    lastMovingMs = millis();
   }
-  // Track how long the engine's been off so nextIntervalMs() can drop to a heartbeat.
+  ignitionOn = (lastMovingMs != 0) && (millis() - lastMovingMs <= TRACKER_TRIP_GRACE_MS);
+  // Track how long the trip's been over so nextIntervalMs() can drop to a heartbeat.
   if (ignitionOn) {
     ignitionOffSinceMs = 0;
   } else if (wasIgnitionOn || ignitionOffSinceMs == 0) {
@@ -1957,17 +1971,20 @@ void loop() {
     updateBleDevInfo();
   }
 
-  // Wake-on-engine-start: while parked the telemetry interval stretches to a 10-min
-  // heartbeat, so check the alternator voltage directly every 15s. When the engine
-  // starts, jump straight to live tracking instead of waiting out the heartbeat.
+  // Wake-on-motion: while parked the telemetry interval stretches to a 10-min
+  // heartbeat. There's no alternator-voltage signal on this hardware, so poll GPS
+  // speed directly every 15s; when the vehicle starts moving, jump straight to live
+  // tracking instead of waiting out the heartbeat.
   static uint32_t lastWakeCheckMs = 0;
   if (!ignitionOn && nowMs - lastWakeCheckMs >= 15000UL) {
     lastWakeCheckMs = nowMs;
-    CRUMB("wakeBatt");
-    const uint16_t mv = modem.getBattVoltage();
-    if (mv >= TRACKER_IGNITION_ON_MV) {
-      Serial.println("Engine started while parked — waking to live tracking");
+    CRUMB("wakeMotion");
+    float wlat = NAN, wlon = NAN, wspd = NAN;
+    if (modem.getGPS(&wlat, &wlon, &wspd) && !isnan(wspd) &&
+        wspd >= TRACKER_MIN_MOVING_SPEED_KPH) {
+      Serial.println("Motion detected while parked — waking to live tracking");
       ignitionOn = true;
+      lastMovingMs = millis();
       ignitionOffSinceMs = 0;
       lastTelemetryMs = 0;  // post immediately
     }

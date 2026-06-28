@@ -20,11 +20,12 @@
 #ifndef TRACKER_API_KEY
 #define TRACKER_API_KEY "c5cc56a23546eb487223fe810ae8a8b76d83376ee09140f7"
 #endif
-#define TRACKER_FIRMWARE_VERSION "0.9.31"
+#define TRACKER_FIRMWARE_VERSION "0.9.32"
 
-// Ignition detection via alternator voltage.
-// Above ON threshold = engine running (alternator charging ~13.8V).
-// Below OFF threshold = battery only. Hysteresis prevents bounce.
+// VESTIGIAL: alternator-voltage ignition detection. This hardware uses a 12V→5V buck
+// with no voltage sense, and AT+CBC only reads the buffer LiPo (~3.8V), so these can
+// never be reached. Trip state is now derived from GPS motion (see TRACKER_TRIP_GRACE_MS).
+// Kept only for reference; safe to delete.
 #define TRACKER_IGNITION_ON_MV  13200U
 #define TRACKER_IGNITION_OFF_MV 12800U
 
@@ -32,9 +33,26 @@
 #define TRACKER_MOVING_INTERVAL_MS 10000UL
 #define TRACKER_PARKED_INTERVAL_MS 120000UL
 #define TRACKER_MIN_MOVING_SPEED_KPH 3.0f
-#define TRACKER_HARD_BRAKE_DELTA_KPH -22.0f
-#define TRACKER_RAPID_ACCEL_DELTA_KPH 22.0f
-#define TRACKER_EVENT_WINDOW_MS 12000UL
+// How long after the last GPS motion we still treat the vehicle as "on a trip", so a
+// red light / stop-and-go doesn't immediately collapse to the slow parked cadence.
+#define TRACKER_TRIP_GRACE_MS 180000UL
+// Harsh-event detection from GPS speed. The OLD logic flagged any absolute speed
+// change over a window up to EVENT_WINDOW_MS, so a gentle 22 kph slowdown spread
+// over 12 s tripped the SAME alert as a genuinely abrupt one — far too many false
+// "hard brake" alerts. Now we threshold on the deceleration RATE (kph per second,
+// normalised by the actual sample gap) and also require a minimum absolute change
+// so one noisy GPS sample can't trip it. NOTE: with GPS speed only sampled every
+// ~10 s these are still coarse; true harshness needs an IMU or high-rate sampling.
+#define TRACKER_HARD_BRAKE_RATE_KPH_S  -4.0f    // <= this rate (kph/s) = hard brake
+#define TRACKER_RAPID_ACCEL_RATE_KPH_S  5.0f    // >= this rate (kph/s) = rapid accel
+#define TRACKER_EVENT_MIN_DELTA_KPH     12.0f   // ignore speed changes smaller than this
+#define TRACKER_EVENT_MIN_DT_MS         2000UL  // gaps shorter than this = GPS jitter
+#define TRACKER_EVENT_WINDOW_MS         12000UL // gaps longer than this aren't one event
+// TLS connect timeout (seconds). TinyGSM defaults to 75s with no override, so a wedged
+// SIM7000G CAOPEN can stall the whole loop long enough to hit the 180s loop watchdog
+// (field freeze: last_hang_op="tlsConnect"). Bound it short so a bad connect fails fast
+// and hands off to the escalating post-fail recovery instead of hanging.
+#define TRACKER_TLS_CONNECT_TIMEOUT_S 20
 #define TRACKER_GNSS_WARMUP_MS 45000UL
 #define TRACKER_GNSS_STATUS_LOG_MS 30000UL
 #define TRACKER_GNSS_RECYCLE_MS 1800000UL
