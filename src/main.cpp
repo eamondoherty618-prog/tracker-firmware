@@ -1131,7 +1131,154 @@ bool ensureClientConnected() {
   return true;
 }
 
-bool postJson(const String& body) {
+// Shared: harvest an OTA offer and/or a WiFi-geolocation fix from the server's reply.
+// Used by both the native (SHREQ) and raw-TLS POST paths.
+void handleTelemetryResponse(const String& respBodyIn) {
+  const int jsonIdx = respBodyIn.indexOf('{');
+  if (jsonIdx < 0) return;
+  const String respBody = respBodyIn.substring(jsonIdx);
+
+  JsonDocument respDoc;
+  if (deserializeJson(respDoc, respBody) != DeserializationError::Ok) return;
+
+  const char* otaVer = respDoc["ota"]["version"] | "";
+  const int otaSize = respDoc["ota"]["size"] | 0;
+  const char* otaMd5 = respDoc["ota"]["md5"] | "";
+  if (strlen(otaVer) > 0 && semverGt(String(otaVer), String(TRACKER_FIRMWARE_VERSION))) {
+    Serial.print("OTA available: v"); Serial.println(otaVer);
+    downloadAndApplyOta(String(otaVer), otaSize, String(otaMd5));
+  }
+  if (!lastGpsQualityFix && !respDoc["wifi_location"]["lat"].isNull()) {
+    const float wLat = respDoc["wifi_location"]["lat"].as<float>();
+    const float wLon = respDoc["wifi_location"]["lon"].as<float>();
+    if (!isnan(wLat) && !isnan(wLon) && wLat != 0.0f) {
+      lastKnownLat = wLat;
+      lastKnownLon = wLon;
+      Serial.print("WiFi geo: "); Serial.print(wLat, 6);
+      Serial.print(","); Serial.println(wLon, 6);
+    }
+  }
+}
+
+// Parse a "+SHREQ: \"POST\",<status>,<datalen>" URC. Returns false if it doesn't match.
+static bool parseShreqUrc(const String& line, int& status, int& datalen) {
+  const int c1 = line.indexOf(',');
+  if (c1 < 0) return false;
+  const int c2 = line.indexOf(',', c1 + 1);
+  if (c2 < 0) return false;
+  status = line.substring(c1 + 1, c2).toInt();
+  datalen = line.substring(c2 + 1).toInt();
+  return status > 0;
+}
+
+// Read the response body via AT+SHREAD=0,<datalen>. Returns "" on failure.
+static String shReadBody(int datalen) {
+  drainSerialAt();
+  SerialAT.print("AT+SHREAD=0,");
+  SerialAT.print(datalen);
+  SerialAT.print("\r\n");
+  String hdr;
+  if (!waitForLineContaining("+SHREAD:", hdr, 10000)) return "";
+  const int colon = hdr.indexOf(':');
+  const int len = (colon >= 0) ? hdr.substring(colon + 1).toInt() : 0;
+  if (len <= 0) return "";
+  String data;
+  data.reserve(len + 1);
+  uint32_t deadline = millis() + 10000;
+  while ((int)data.length() < len && millis() < deadline) {
+    while (SerialAT.available() && (int)data.length() < len) {
+      data += (char)SerialAT.read();
+    }
+    delay(5);
+  }
+  return data;
+}
+
+// Native HTTPS POST via the SIM7000G's built-in HTTP(S) app (AT+SHREQ). The raw TLS
+// sockets used by postJsonRawTls() drop ~half of HTTPS responses at this cadence (a
+// documented modem limit); the native client handles the request/response framing in
+// the modem and is far more reliable. Returns true only on a 2xx. Always tears down the
+// SH session so a later raw-TLS/OTA CAOPEN isn't left fighting an open SH connection.
+bool postJsonNative(const String& body) {
+  const int sig = modem.getSignalQuality();
+  if (sig == 0 || sig == 99) {
+    Serial.print("Signal too weak ("); Serial.print(sig); Serial.println("), skipping");
+    return false;
+  }
+  connectGprs();
+  if (!gprsConnected) return false;
+
+  CRUMB("shConn");
+  sendSimpleAt("+SHDISC", 3000);  // drop any stale session first
+
+  // SSL context for the SH app: TLS 1.2, no CA verification.
+  sendSimpleAt("+CSSLCFG=\"sslversion\",1,3", 3000);
+  sendSimpleAt("+SHSSL=1,\"\"", 3000);
+  sendSimpleAt("+SHCONF=\"URL\",\"https://" + String(TRACKER_SERVER_HOST) + "\"", 3000);
+  sendSimpleAt("+SHCONF=\"BODYLEN\",1024", 3000);
+  sendSimpleAt("+SHCONF=\"HEADERLEN\",350", 3000);
+
+  if (!sendSimpleAt("+SHCONN", TRACKER_TLS_CONNECT_TIMEOUT_S * 1000UL)) {
+    Serial.println("SHCONN failed");
+    sendSimpleAt("+SHDISC", 3000);
+    return false;
+  }
+
+  sendSimpleAt("+SHCHEAD", 3000);  // clear any prior headers
+  sendSimpleAt("+SHAHEAD=\"Content-Type\",\"application/json\"", 3000);
+  sendSimpleAt("+SHAHEAD=\"x-tracker-key\",\"" + trackerApiKey() + "\"", 3000);
+  sendSimpleAt("+SHAHEAD=\"User-Agent\",\"" + trackerDeviceId() + "/" +
+               TRACKER_FIRMWARE_VERSION + "\"", 3000);
+
+  // Body: AT+SHBOD=<len>,<timeout_ms> -> ">" prompt -> raw bytes -> OK.
+  drainSerialAt();
+  SerialAT.print("AT+SHBOD=");
+  SerialAT.print(body.length());
+  SerialAT.print(",10000\r\n");
+  if (!waitForPromptChar('>', 5000)) {
+    Serial.println("SHBOD: no prompt");
+    sendSimpleAt("+SHDISC", 3000);
+    return false;
+  }
+  SerialAT.print(body);
+  if (!waitForOk(10000)) {
+    Serial.println("SHBOD: body not accepted");
+    sendSimpleAt("+SHDISC", 3000);
+    return false;
+  }
+
+  // Request: type 3 = POST. Returns OK, then an async +SHREQ: "POST",<status>,<datalen>.
+  CRUMB("shReq");
+  drainSerialAt();
+  SerialAT.print("AT+SHREQ=\"");
+  SerialAT.print(TRACKER_SERVER_PATH);
+  SerialAT.print("\",3\r\n");
+  String shreqLine;
+  if (!waitForLineContaining("+SHREQ:", shreqLine, 20000)) {
+    Serial.println("SHREQ: no response");
+    sendSimpleAt("+SHDISC", 3000);
+    return false;
+  }
+  int status = 0, datalen = 0;
+  parseShreqUrc(shreqLine, status, datalen);
+  Serial.print("SHREQ status="); Serial.print(status);
+  Serial.print(" datalen="); Serial.println(datalen);
+
+  String respBody;
+  if (datalen > 0) {
+    CRUMB("shRead");
+    respBody = shReadBody(datalen);
+  }
+  sendSimpleAt("+SHDISC", 3000);
+
+  const bool success = (status >= 200 && status < 300);
+  if (success && respBody.length() > 0) handleTelemetryResponse(respBody);
+  return success;
+}
+
+// Raw-TLS POST (legacy path). Kept as the fallback for when the native SHREQ path is
+// unsupported/misbehaving on a given modem firmware — see postJson() below.
+bool postJsonRawTls(const String& body) {
   // Skip if signal is too weak — timeouts corrupt modem state.
   const int sig = modem.getSignalQuality();
   if (sig == 0 || sig == 99) {
@@ -1189,32 +1336,35 @@ bool postJson(const String& body) {
   // Parse JSON body (after blank line separating headers from body).
   const int bodyStart = response.indexOf("\r\n\r\n");
   if (success && bodyStart >= 0) {
-    String respBody = response.substring(bodyStart + 4);
-    const int jsonIdx = respBody.indexOf('{');
-    if (jsonIdx >= 0) respBody = respBody.substring(jsonIdx);
-
-    JsonDocument respDoc;
-    if (deserializeJson(respDoc, respBody) == DeserializationError::Ok) {
-      const char* otaVer = respDoc["ota"]["version"] | "";
-      const int otaSize = respDoc["ota"]["size"] | 0;
-      const char* otaMd5 = respDoc["ota"]["md5"] | "";
-      if (strlen(otaVer) > 0 && semverGt(String(otaVer), String(TRACKER_FIRMWARE_VERSION))) {
-        Serial.print("OTA available: v"); Serial.println(otaVer);
-        downloadAndApplyOta(String(otaVer), otaSize, String(otaMd5));
-      }
-      if (!lastGpsQualityFix && !respDoc["wifi_location"]["lat"].isNull()) {
-        const float wLat = respDoc["wifi_location"]["lat"].as<float>();
-        const float wLon = respDoc["wifi_location"]["lon"].as<float>();
-        if (!isnan(wLat) && !isnan(wLon) && wLat != 0.0f) {
-          lastKnownLat = wLat;
-          lastKnownLon = wLon;
-          Serial.print("WiFi geo: "); Serial.print(wLat, 6);
-          Serial.print(","); Serial.println(wLon, 6);
-        }
-      }
-    }
+    handleTelemetryResponse(response.substring(bodyStart + 4));
   }
   return success;
+}
+
+// Telemetry POST dispatcher. Tries the native SIM7000G HTTPS client (AT+SHREQ) first —
+// it's far more reliable than raw TLS sockets — and transparently falls back to the
+// raw-TLS path on failure. After repeated native failures it latches native OFF (until
+// reboot) so a modem firmware that doesn't support SHREQ never keeps paying the failed
+// attempt nor takes the fleet dark.
+bool postJson(const String& body) {
+#if TRACKER_USE_NATIVE_HTTPS
+  static bool nativeEnabled = true;
+  static uint8_t nativeFailStreak = 0;
+  if (nativeEnabled) {
+    if (postJsonNative(body)) {
+      nativeFailStreak = 0;
+      return true;
+    }
+    if (++nativeFailStreak >= 3) {
+      Serial.println("Native HTTPS failing repeatedly — latching OFF, using raw TLS");
+      nativeEnabled = false;
+    } else {
+      Serial.println("Native HTTPS failed — falling back to raw TLS for this post");
+    }
+    sendSimpleAt("+SHDISC", 3000);  // ensure no SH session lingers before raw CAOPEN
+  }
+#endif
+  return postJsonRawTls(body);
 }
 
 // Standalone OTA check via TinyGsmClientSecure GET — independent of telemetry POST response.

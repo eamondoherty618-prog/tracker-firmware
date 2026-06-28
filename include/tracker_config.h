@@ -20,7 +20,7 @@
 #ifndef TRACKER_API_KEY
 #define TRACKER_API_KEY "c5cc56a23546eb487223fe810ae8a8b76d83376ee09140f7"
 #endif
-#define TRACKER_FIRMWARE_VERSION "0.9.32"
+#define TRACKER_FIRMWARE_VERSION "0.9.33"
 
 // VESTIGIAL: alternator-voltage ignition detection. This hardware uses a 12V→5V buck
 // with no voltage sense, and AT+CBC only reads the buffer LiPo (~3.8V), so these can
@@ -53,6 +53,12 @@
 // (field freeze: last_hang_op="tlsConnect"). Bound it short so a bad connect fails fast
 // and hands off to the escalating post-fail recovery instead of hanging.
 #define TRACKER_TLS_CONNECT_TIMEOUT_S 20
+// Use the SIM7000G's native HTTP(S) app (AT+SHREQ) for telemetry POSTs instead of raw
+// TLS sockets, which drop ~half of HTTPS responses at this cadence (a documented modem
+// limit). The native path is the primary; postJson() auto-falls-back to the raw-TLS
+// path and self-disables native after repeated failures, so an unsupported/buggy modem
+// firmware can never take the fleet dark. Set to 0 to force the old raw-TLS path.
+#define TRACKER_USE_NATIVE_HTTPS 1
 #define TRACKER_GNSS_WARMUP_MS 45000UL
 #define TRACKER_GNSS_STATUS_LOG_MS 30000UL
 #define TRACKER_GNSS_RECYCLE_MS 1800000UL
