@@ -349,6 +349,81 @@ bool sendVerboseAt(const String& command, uint32_t timeoutMs = 5000) {
   return waitForOkVerbose(timeoutMs, "    ");
 }
 
+// AT+CASEND's completion signal varies by modem firmware revision: some return
+// an async "+CASEND:" URC, this SIM7000G (R1529) just returns plain "OK" and
+// signals incoming data separately via "+CADATAIND:". Accept either as success
+// so the upload doesn't hang waiting for a URC this firmware never sends.
+bool waitForCasendComplete(uint32_t timeoutMs) {
+  const uint32_t deadline = millis() + timeoutMs;
+  String line;
+  while (millis() < deadline) {
+    while (SerialAT.available()) {
+      const char c = static_cast<char>(SerialAT.read());
+      if (c == '\r') continue;
+      if (c == '\n') {
+        line.trim();
+        if (line.length() > 0) {
+          if (line == "OK" || line.indexOf("+CASEND:") >= 0) return true;
+          if (line == "ERROR") return false;
+          line = "";
+        }
+      } else {
+        line += c;
+      }
+    }
+    delay(5);
+  }
+  return false;
+}
+
+// AT+CARECV's response is "+CARECV: <len>,<raw bytes...>" — the payload that
+// follows the prefix is NOT line-oriented text; it's the literal socket data
+// (HTTP headers + binary body for an OTA download), which routinely contains
+// '\n' bytes of its own. Reading it with a line-based parser silently
+// truncates/corrupts chunks at the first embedded newline. Parse the "+CARECV:
+// <len>," prefix as a raw byte sequence, then read exactly <len> bytes after
+// it — no line semantics involved. Returns bytes copied into buf, or -1 on
+// timeout/protocol mismatch (no trailing comma).
+int readCarecvChunk(uint8_t* buf, int bufCap, uint32_t timeoutMs) {
+  const uint32_t deadline = millis() + timeoutMs;
+  const char* needle = "+CARECV: ";
+  const int needleLen = 9;
+  int matched = 0;
+  while (millis() < deadline && matched < needleLen) {
+    if (SerialAT.available()) {
+      const char c = static_cast<char>(SerialAT.read());
+      if (c == needle[matched]) matched++;
+      else matched = (c == needle[0]) ? 1 : 0;
+    } else {
+      delay(1);
+    }
+  }
+  if (matched != needleLen) return -1;
+
+  int len = 0;
+  bool sawDigit = false;
+  bool sawComma = false;
+  while (millis() < deadline && !sawComma) {
+    if (SerialAT.available()) {
+      const char c = static_cast<char>(SerialAT.read());
+      if (c >= '0' && c <= '9') { len = len * 10 + (c - '0'); sawDigit = true; }
+      else if (c == ',') sawComma = true;
+    } else {
+      delay(1);
+    }
+  }
+  if (!sawDigit || !sawComma) return -1;
+  if (len > bufCap) len = bufCap;
+
+  int got = 0;
+  while (got < len && millis() < deadline) {
+    if (SerialAT.available()) buf[got++] = (uint8_t)SerialAT.read();
+    else delay(1);
+  }
+  waitForOk(2000);
+  return got;
+}
+
 static uint8_t nmeaXorChecksum(const char* sentence) {
   uint8_t crc = 0;
   for (int i = 1; sentence[i] && sentence[i] != '*'; i++)
@@ -956,7 +1031,8 @@ void downloadAndApplyOta(const String& version, int sizeHint, const String& md5 
   if (!waitForPromptChar('>', 10000)) { sendSimpleAt("+CACLOSE=0", 3000); return; }
   SerialAT.write(reinterpret_cast<const uint8_t*>(req.c_str()), req.length());
   SerialAT.flush();
-  if (!waitForLineContaining("+CASEND:", matchedLine, 30000)) {
+  if (!waitForCasendComplete(30000)) {
+    Serial.println("OTA: CASEND no response");
     sendSimpleAt("+CACLOSE=0", 3000); return;
   }
   Serial.println("OTA: request sent, awaiting headers...");
@@ -967,25 +1043,23 @@ void downloadAndApplyOta(const String& version, int sizeHint, const String& md5 
   int bodyStart = -1;
   int firstChunkRead = 0;
 
-  drainSerialAt();
-  SerialAT.print("AT+CARECV=0,1024\r\n");
-  if (!waitForLineContaining("+CARECV:", matchedLine, 15000)) {
-    Serial.println("OTA: first CARECV timeout"); sendSimpleAt("+CACLOSE=0", 3000); return;
-  }
-  {
-    const int lc = matchedLine.lastIndexOf(',');
-    const int chunkSize = lc >= 0 ? matchedLine.substring(lc + 1).toInt() : 0;
-    if (chunkSize > 0) {
-      const uint32_t dl = millis() + 8000;
-      while (firstChunkRead < chunkSize && millis() < dl) {
-        if (SerialAT.available()) otaBuf[firstChunkRead++] = (uint8_t)SerialAT.read();
-        else delay(1);
-      }
-      waitForOk(2000);
-      parseHttpHeadersForOta(otaBuf, firstChunkRead, contentLength, bodyStart);
-      Serial.print("OTA: Content-Length="); Serial.print(contentLength);
-      Serial.print(" bodyStart="); Serial.println(bodyStart);
+  // The GET response isn't always ready the instant CASEND completes — retry
+  // CARECV a few times (matches the body-read loop's pattern below) instead
+  // of giving up on the first empty chunk.
+  int headerRetries = 0;
+  while (bodyStart < 0 && headerRetries < 10) {
+    drainSerialAt();
+    SerialAT.print("AT+CARECV=0,1024\r\n");
+    const int n = readCarecvChunk(otaBuf, sizeof(otaBuf), 8000);
+    if (n <= 0) {
+      headerRetries++;
+      delay(500);
+      continue;
     }
+    firstChunkRead = n;
+    parseHttpHeadersForOta(otaBuf, firstChunkRead, contentLength, bodyStart);
+    Serial.print("OTA: Content-Length="); Serial.print(contentLength);
+    Serial.print(" bodyStart="); Serial.println(bodyStart);
   }
 
   if (bodyStart < 0 || contentLength <= 0) {
@@ -1012,21 +1086,9 @@ void downloadAndApplyOta(const String& version, int sizeHint, const String& md5 
   while (totalBody < contentLength && retries < 60) {
     drainSerialAt();
     SerialAT.print("AT+CARECV=0,1024\r\n");
-    if (!waitForLineContaining("+CARECV:", matchedLine, 10000)) {
-      retries++; continue;
-    }
-    const int lc = matchedLine.lastIndexOf(',');
-    const int chunkSize = lc >= 0 ? matchedLine.substring(lc + 1).toInt() : 0;
-    if (chunkSize == 0) { delay(500); retries++; continue; }
+    const int bytesRead = readCarecvChunk(otaBuf, sizeof(otaBuf), 10000);
+    if (bytesRead <= 0) { delay(500); retries++; continue; }
     retries = 0;
-
-    int bytesRead = 0;
-    const uint32_t dl = millis() + 5000;
-    while (bytesRead < chunkSize && millis() < dl) {
-      if (SerialAT.available()) otaBuf[bytesRead++] = (uint8_t)SerialAT.read();
-      else delay(1);
-    }
-    waitForOk(2000);
 
     const size_t written = Update.write(otaBuf, bytesRead);
     if ((int)written != bytesRead) {
@@ -1784,7 +1846,7 @@ String cellularRequest(const char* method, const String& path, const String& bod
   if (!waitForPromptChar('>', 10000)) { sendSimpleAt("+CACLOSE=0", 3000); return ""; }
   SerialAT.write(reinterpret_cast<const uint8_t*>(request.c_str()), request.length());
   SerialAT.write(0x1A); SerialAT.flush();
-  if (!waitForLineContaining("+CASEND:", matchedLine, 30000)) {
+  if (!waitForCasendComplete(30000)) {
     sendSimpleAt("+CACLOSE=0", 3000); return "";
   }
 
