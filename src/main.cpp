@@ -967,8 +967,11 @@ bool semverGt(const String& a, const String& b) {
 }
 
 // Scans raw HTTP response bytes for header/body boundary and Content-Length.
+// Note: does NOT reset contentLength if no Content-Length header is found —
+// this server doesn't send one (HTTP/2 origin has no need for it), so the
+// caller's sizeHint (from the OTA offer's JSON) is the only source of truth
+// and must survive untouched.
 bool parseHttpHeadersForOta(const uint8_t* buf, int len, int& contentLength, int& bodyStart) {
-  contentLength = -1;
   bodyStart = -1;
   for (int i = 0; i <= len - 4; i++) {
     if (buf[i] == '\r' && buf[i+1] == '\n' && buf[i+2] == '\r' && buf[i+3] == '\n') {
@@ -994,6 +997,58 @@ bool parseHttpHeadersForOta(const uint8_t* buf, int len, int& contentLength, int
   }
   return true;
 }
+
+// The OTA server has no Content-Length to give (its origin is HTTP/2, which
+// doesn't need one), so the HTTP/1.1 response the modem actually receives
+// over the raw socket uses chunked transfer-encoding instead: each chunk is
+// "<size-in-hex>\r\n<size bytes of data>\r\n", terminated by a "0\r\n\r\n"
+// chunk. Without this, the literal "<hex>\r\n" framing bytes get written
+// straight into the OTA partition, corrupting the image immediately.
+struct ChunkedOtaDecoder {
+  enum State { READ_SIZE, READ_DATA, READ_DATA_CRLF, DONE } state = READ_SIZE;
+  size_t remaining = 0;
+  String sizeHex;
+  bool ok = true;
+
+  // Feeds raw bytes (as received from CARECV) through the decoder, writing
+  // decoded firmware bytes straight to Update.write(). Returns false only on
+  // an actual Update.write() failure (sets ok=false so the caller can bail).
+  void feed(const uint8_t* buf, int len) {
+    int i = 0;
+    while (i < len && state != DONE && ok) {
+      switch (state) {
+        case READ_SIZE: {
+          const char c = static_cast<char>(buf[i++]);
+          if (c == '\r') break;
+          if (c == '\n') {
+            remaining = strtoul(sizeHex.c_str(), nullptr, 16);
+            sizeHex = "";
+            state = (remaining == 0) ? DONE : READ_DATA;
+          } else {
+            sizeHex += c;
+          }
+          break;
+        }
+        case READ_DATA: {
+          const int take = (int)min((size_t)(len - i), remaining);
+          if (take > 0) {
+            if (Update.write(const_cast<uint8_t*>(buf + i), take) != (size_t)take) { ok = false; break; }
+            i += take;
+            remaining -= take;
+          }
+          if (remaining == 0) state = READ_DATA_CRLF;
+          break;
+        }
+        case READ_DATA_CRLF: {
+          const char c = static_cast<char>(buf[i++]);
+          if (c == '\n') state = READ_SIZE;
+          break;
+        }
+        default: break;
+      }
+    }
+  }
+};
 
 void downloadAndApplyOta(const String& version, int sizeHint, const String& md5 = "") {
   Serial.print("OTA: downloading v"); Serial.println(version);
@@ -1024,7 +1079,7 @@ void downloadAndApplyOta(const String& version, int sizeHint, const String& md5 
     " HTTP/1.1\r\nHost: " + TRACKER_SERVER_HOST +
     "\r\nUser-Agent: " + trackerDeviceId() + "/" + TRACKER_FIRMWARE_VERSION +
     "\r\nx-tracker-key: " + trackerApiKey() +
-    "\r\nConnection: close\r\n\r\n";
+    "\r\n\r\n";
 
   drainSerialAt();
   SerialAT.print("AT+CASEND=0,"); SerialAT.print(req.length()); SerialAT.print("\r\n");
@@ -1048,6 +1103,7 @@ void downloadAndApplyOta(const String& version, int sizeHint, const String& md5 
   // of giving up on the first empty chunk.
   int headerRetries = 0;
   while (bodyStart < 0 && headerRetries < 10) {
+    g_loopBeat++;  // OTA download legitimately runs long — keep the loop watchdog fed
     drainSerialAt();
     SerialAT.print("AT+CARECV=0,1024\r\n");
     const int n = readCarecvChunk(otaBuf, sizeof(otaBuf), 8000);
@@ -1076,33 +1132,33 @@ void downloadAndApplyOta(const String& version, int sizeHint, const String& md5 
     Serial.print("OTA: MD5 check: "); Serial.println(md5);
   }
 
-  int totalBody = firstChunkRead - bodyStart;
-  if (totalBody > 0) {
-    Update.write(otaBuf + bodyStart, totalBody);
-    Serial.print("OTA: "); Serial.print(totalBody); Serial.print("/"); Serial.println(contentLength);
+  ChunkedOtaDecoder decoder;
+  const int firstBodyLen = firstChunkRead - bodyStart;
+  if (firstBodyLen > 0) {
+    decoder.feed(otaBuf + bodyStart, firstBodyLen);
   }
 
   int retries = 0;
-  while (totalBody < contentLength && retries < 60) {
+  while (decoder.ok && Update.progress() < (size_t)contentLength && retries < 300) {
+    g_loopBeat++;  // OTA download legitimately runs long — keep the loop watchdog fed
     drainSerialAt();
     SerialAT.print("AT+CARECV=0,1024\r\n");
     const int bytesRead = readCarecvChunk(otaBuf, sizeof(otaBuf), 10000);
     if (bytesRead <= 0) { delay(500); retries++; continue; }
     retries = 0;
 
-    const size_t written = Update.write(otaBuf, bytesRead);
-    if ((int)written != bytesRead) {
-      Serial.print("OTA: write error: "); Serial.println(Update.errorString());
-      Update.abort(); sendSimpleAt("+CACLOSE=0", 3000); return;
-    }
-    totalBody += bytesRead;
-    Serial.print("OTA: "); Serial.print(totalBody); Serial.print("/"); Serial.println(contentLength);
+    decoder.feed(otaBuf, bytesRead);
+    Serial.print("OTA: "); Serial.print(Update.progress()); Serial.print("/"); Serial.println(contentLength);
   }
 
   sendSimpleAt("+CACLOSE=0", 5000);
 
-  if (totalBody < contentLength) {
-    Serial.print("OTA: incomplete — "); Serial.print(totalBody);
+  if (!decoder.ok) {
+    Serial.print("OTA: write error: "); Serial.println(Update.errorString());
+    Update.abort(); return;
+  }
+  if (Update.progress() < (size_t)contentLength) {
+    Serial.print("OTA: incomplete — got "); Serial.print(Update.progress());
     Serial.print("/"); Serial.println(contentLength);
     Update.abort(); return;
   }
