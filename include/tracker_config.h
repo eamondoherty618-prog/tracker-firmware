@@ -20,7 +20,7 @@
 #ifndef TRACKER_API_KEY
 #define TRACKER_API_KEY "c5cc56a23546eb487223fe810ae8a8b76d83376ee09140f7"
 #endif
-#define TRACKER_FIRMWARE_VERSION "0.10.0"
+#define TRACKER_FIRMWARE_VERSION "0.10.1"
 
 // VESTIGIAL: alternator-voltage ignition detection. This hardware uses a 12V→5V buck
 // with no voltage sense, and AT+CBC only reads the buffer LiPo (~3.8V), so these can
@@ -65,10 +65,13 @@
 // handshake (~6-9KB each) that was burning the SIM data budget. A full HTTPS POST
 // still runs every TRACKER_NCE_HTTPS_HEARTBEAT_MS for assured delivery + OTA offers,
 // and every UDP failure falls back to HTTPS, so the tracker→server→map pipeline can
-// never go dark from the UDP path alone. Off by default — enable per-board with a
-// -D TRACKER_USE_NCE_UDP=1 build flag (bench trial: tracker-001 only).
+// never go dark from the UDP path alone. Fleet default ON as of v0.10.1 — proven
+// end-to-end on the bench (tracker-001, 2026-07-05). NOTE: a SIM whose data session
+// predates the org's 1NCE OS activation isn't routed to the UDP endpoint until it
+// re-attaches (fix: Reset connection in the portal / POST /v1/sims/{iccid}/reset);
+// the HTTPS fallback covers tracking either way. Set 0 to force HTTPS-only.
 #ifndef TRACKER_USE_NCE_UDP
-#define TRACKER_USE_NCE_UDP 0
+#define TRACKER_USE_NCE_UDP 1
 #endif
 #define TRACKER_NCE_UDP_HOST "udp.os.1nce.com"
 #define TRACKER_NCE_UDP_PORT 4445
