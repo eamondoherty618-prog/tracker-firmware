@@ -1547,7 +1547,11 @@ void flushQueue() {
   }
 }
 
-String buildTelemetry() {
+// compact=true builds a trimmed payload for the 508-byte 1NCE UDP datagram limit:
+// diagnostics-only fields are dropped (they still ship with every HTTPS heartbeat,
+// which sends the full payload) and the wifi scan is capped. Position, motion,
+// events, battery and the geolocation inputs the server needs are all kept.
+String buildTelemetry(bool compact = false) {
   float lat = NAN;
   float lon = NAN;
   float speedKph = NAN;
@@ -1698,42 +1702,44 @@ String buildTelemetry() {
 
   JsonDocument doc;
   doc["device_id"] = trackerDeviceId();
-  doc["hardware_id"] = trackerHardwareId();
-  doc["uptime_ms"] = nowMs;
   doc["firmware"] = TRACKER_FIRMWARE_VERSION;
   doc["has_fix"] = hasFix;
   doc["fix_source"] = qualityFix ? "GPS" : (hasFix ? "GPS_MARGINAL" : "None");
-  // GNSS diagnostics — always reported so we can tell "blind" (0 visible =
-  // antenna/RF problem) from "searching" (visible>0 but not enough used = cold
-  // start / weak sky). Also report how long GNSS has been enabled this boot.
-  doc["sats_visible"] = visibleSatellites;
-  doc["sats_used"] = usedSatellites;
-  doc["gnss_on_ms"] = gpsEnabled && gpsEnabledAtMs ? (nowMs - gpsEnabledAtMs) : 0;
-  doc["gnss_enabled"] = gpsEnabled;
-  // Raw CGNSINF string — lets us read C/N0 (signal strength). C/N0=0 with 0 sats
-  // = no RF reaching the receiver (antenna); C/N0>0 = signal present, locking issue.
-  if (!qualityFix) {
-    String graw = modem.getGPSraw();
-    if (graw.length() > 0) doc["gnss_raw"] = graw;
-  }
-  if (gpsFirstFixMs > 0 && gpsEnabledAtMs > 0) {
-    doc["ttff_ms"] = gpsFirstFixMs - gpsEnabledAtMs;
-  }
   doc["motion_state"] = hasFix ? motionState(speedKph) : "unknown";
   doc["ignition_on"] = ignitionOn;
   doc["cell_rssi"] = rssi;
   doc["battery_mv"] = batteryMv;
   doc["queued_messages"] = queueCount;
-  // Connectivity diagnostics — let the server show what happened during a mid-drive
-  // stall without a serial cable. boot_count jumps on a brownout/crash reset;
-  // watchdog/forced_reconnect counts climb when the data session dies (handovers);
-  // free_heap falling over time would point at a memory leak.
-  doc["free_heap"] = ESP.getFreeHeap();
-  doc["boot_count"] = g_bootCount;
-  doc["watchdog_count"] = g_watchdogCount;
-  doc["forced_reconnects"] = g_forcedReconnects;
-  doc["reset_reason"] = g_resetReason;                       // why it last reset
-  if (g_lastHangOp[0]) doc["last_hang_op"] = g_lastHangOp;   // what it was doing when it hung
+  doc["boot_count"] = g_bootCount;  // cheap + tracks brownout resets — kept even compact
+  if (!compact) {
+    doc["hardware_id"] = trackerHardwareId();
+    doc["uptime_ms"] = nowMs;
+    // GNSS diagnostics — always reported so we can tell "blind" (0 visible =
+    // antenna/RF problem) from "searching" (visible>0 but not enough used = cold
+    // start / weak sky). Also report how long GNSS has been enabled this boot.
+    doc["sats_visible"] = visibleSatellites;
+    doc["sats_used"] = usedSatellites;
+    doc["gnss_on_ms"] = gpsEnabled && gpsEnabledAtMs ? (nowMs - gpsEnabledAtMs) : 0;
+    doc["gnss_enabled"] = gpsEnabled;
+    // Raw CGNSINF string — lets us read C/N0 (signal strength). C/N0=0 with 0 sats
+    // = no RF reaching the receiver (antenna); C/N0>0 = signal present, locking issue.
+    if (!qualityFix) {
+      String graw = modem.getGPSraw();
+      if (graw.length() > 0) doc["gnss_raw"] = graw;
+    }
+    if (gpsFirstFixMs > 0 && gpsEnabledAtMs > 0) {
+      doc["ttff_ms"] = gpsFirstFixMs - gpsEnabledAtMs;
+    }
+    // Connectivity diagnostics — let the server show what happened during a mid-drive
+    // stall without a serial cable. boot_count jumps on a brownout/crash reset;
+    // watchdog/forced_reconnect counts climb when the data session dies (handovers);
+    // free_heap falling over time would point at a memory leak.
+    doc["free_heap"] = ESP.getFreeHeap();
+    doc["watchdog_count"] = g_watchdogCount;
+    doc["forced_reconnects"] = g_forcedReconnects;
+    doc["reset_reason"] = g_resetReason;                       // why it last reset
+    if (g_lastHangOp[0]) doc["last_hang_op"] = g_lastHangOp;   // what it was doing when it hung
+  }
 
   if (eventName.length() > 0) {
     doc["event"] = eventName;
@@ -1773,6 +1779,12 @@ String buildTelemetry() {
   if (!qualityFix && wifiScanJson.length() > 2) { // "[]" is 2 chars — only add if networks found
     JsonDocument wifiDoc;
     if (deserializeJson(wifiDoc, wifiScanJson) == DeserializationError::Ok) {
+      // Compact (UDP) payloads must fit 508 bytes — 4 APs is plenty for the server's
+      // WiFi geolocation; the full scan still goes out with every HTTPS heartbeat.
+      if (compact) {
+        JsonArray arr = wifiDoc.as<JsonArray>();
+        while (arr.size() > 4) arr.remove(arr.size() - 1);
+      }
       doc["wifi_scan"] = wifiDoc;
     }
   }
@@ -1811,6 +1823,103 @@ String buildTelemetry() {
   String body;
   serializeJson(doc, body);
   return body;
+}
+
+#if TRACKER_USE_NCE_UDP
+// Send one telemetry report as a plain UDP datagram to the 1NCE OS Device Integrator.
+// No TLS: the packet never leaves the carrier network and the SIM is the identity.
+// Uses the modem's CA app on cid 0 like the other transports; the OTA path showed this
+// modem firmware selects the protocol via CASSLCFG (protocol,1 = UDP) with the 3-arg
+// CAOPEN, so try that first and fall back to the documented 5-arg CAOPEN form.
+// "Success" = the modem accepted the datagram — UDP has no delivery ACK; assured
+// delivery comes from the periodic HTTPS heartbeat in postTelemetry().
+bool postUdp1nce(const String& body) {
+  if (body.length() > TRACKER_NCE_UDP_MAX_PAYLOAD) return false;
+  const int sig = modem.getSignalQuality();
+  if (sig == 0 || sig == 99) {
+    Serial.print("UDP: signal too weak ("); Serial.print(sig); Serial.println("), skipping");
+    return false;
+  }
+  connectGprs();
+  if (!gprsConnected) return false;
+
+  CRUMB("udpOpen");
+  sendSimpleAt("+CACLOSE=0", 2000);          // cid 0 is shared with the TLS paths
+  sendSimpleAt("+CASSLCFG=0,ssl,0", 2000);   // make sure no SSL config lingers on it
+  sendSimpleAt("+CASSLCFG=0,protocol,1", 2000);  // 1 = UDP on this CA-app firmware
+
+  String line;
+  drainSerialAt();
+  SerialAT.print("AT+CAOPEN=0,\"" TRACKER_NCE_UDP_HOST "\",");
+  SerialAT.print(TRACKER_NCE_UDP_PORT); SerialAT.print("\r\n");
+  bool opened = waitForLineContaining("+CAOPEN:", line, 15000);
+  if (opened) {
+    const int c = line.lastIndexOf(',');
+    opened = c >= 0 && line.substring(c + 1).toInt() == 0;
+  }
+  if (!opened) {
+    // Some SIM7000 firmware revisions want the full documented form instead.
+    drainSerialAt();
+    SerialAT.print("AT+CAOPEN=0,0,\"UDP\",\"" TRACKER_NCE_UDP_HOST "\",");
+    SerialAT.print(TRACKER_NCE_UDP_PORT); SerialAT.print("\r\n");
+    opened = waitForLineContaining("+CAOPEN:", line, 15000);
+    if (opened) {
+      const int c = line.lastIndexOf(',');
+      opened = c >= 0 && line.substring(c + 1).toInt() == 0;
+    }
+  }
+  if (!opened) {
+    Serial.println("UDP: CAOPEN failed");
+    sendSimpleAt("+CACLOSE=0", 2000);
+    sendSimpleAt("+CASSLCFG=0,protocol,0", 2000);  // restore TCP for the TLS paths
+    return false;
+  }
+
+  CRUMB("udpSend");
+  drainSerialAt();
+  SerialAT.print("AT+CASEND=0,"); SerialAT.print(body.length()); SerialAT.print("\r\n");
+  if (!waitForPromptChar('>', 5000)) {
+    Serial.println("UDP: CASEND no prompt");
+    sendSimpleAt("+CACLOSE=0", 2000);
+    sendSimpleAt("+CASSLCFG=0,protocol,0", 2000);  // restore TCP for the TLS paths
+    return false;
+  }
+  SerialAT.write(reinterpret_cast<const uint8_t*>(body.c_str()), body.length());
+  SerialAT.flush();
+  const bool sent = waitForCasendComplete(10000);
+  sendSimpleAt("+CACLOSE=0", 2000);
+  // cid 0 is shared with the raw-TLS and OTA paths — leave it back on TCP so a
+  // later CAOPEN from those paths doesn't inherit UDP mode.
+  sendSimpleAt("+CASSLCFG=0,protocol,0", 2000);
+  if (!sent) Serial.println("UDP: CASEND not confirmed");
+  return sent;
+}
+#endif  // TRACKER_USE_NCE_UDP
+
+// Transport dispatcher for one telemetry report. On UDP builds: a full-payload HTTPS
+// POST every TRACKER_NCE_HTTPS_HEARTBEAT_MS (assured delivery, diagnostics, and the
+// OTA offer comes back in its response); everything between heartbeats goes as one
+// UDP datagram, falling back to HTTPS whenever UDP can't send or the payload can't
+// fit the datagram. On normal builds this is just postJson().
+bool postTelemetry(const String& body) {
+#if TRACKER_USE_NCE_UDP
+  static uint32_t lastHeartbeatMs = 0;
+  const uint32_t now = millis();
+  if (lastHeartbeatMs == 0 || now - lastHeartbeatMs >= TRACKER_NCE_HTTPS_HEARTBEAT_MS) {
+    Serial.println("NCE: HTTPS heartbeat (full payload)");
+    if (postJson(buildTelemetry(false))) {
+      lastHeartbeatMs = now;
+      return true;
+    }
+    // Heartbeat failed — fall through to UDP so live tracking continues; the
+    // heartbeat (and its OTA check) retries on the next cycle.
+  }
+  if (body.length() <= TRACKER_NCE_UDP_MAX_PAYLOAD && postUdp1nce(body)) return true;
+  Serial.println("NCE: UDP unavailable — HTTPS fallback for this post");
+  return postJson(body);
+#else
+  return postJson(body);
+#endif
 }
 
 uint32_t nextIntervalMs() {
@@ -2264,11 +2373,13 @@ void loop() {
   if (lastTelemetryMs == 0 || nowMs - lastTelemetryMs >= interval) {
     lastTelemetryMs = nowMs;
     CRUMB("buildTelem");
-    const String payload = buildTelemetry();
+    // UDP builds send the compact payload (508-byte datagram limit); the full payload
+    // still goes out with every HTTPS heartbeat inside postTelemetry().
+    const String payload = buildTelemetry(TRACKER_USE_NCE_UDP != 0);
 
     Serial.println(payload);
     CRUMB("postJson");
-    if (!postJson(payload)) {
+    if (!postTelemetry(payload)) {
       Serial.println("Queueing telemetry");
       enqueue(payload);
       g_consecutivePostFails++;
@@ -2303,12 +2414,17 @@ void loop() {
       g_consecutivePostFails = 0;
       CRUMB("flushQueue");
       flushQueue();
+#if !TRACKER_USE_NCE_UDP
+      // Every-5-posts OTA GET = a fresh TLS handshake every ~50s while driving — a big
+      // slice of the SIM data burn. UDP builds get OTA offers in the HTTPS heartbeat
+      // response instead (handleTelemetryResponse), so they skip this entirely.
       telemetryCycleCount++;
       if (telemetryCycleCount >= 5) {
         telemetryCycleCount = 0;
         CRUMB("otaCheck");
         checkOtaStandalone();
       }
+#endif
     }
   }
 
