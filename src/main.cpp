@@ -106,6 +106,13 @@ RTC_NOINIT_ATTR char g_breadcrumb[24];
 RTC_NOINIT_ATTR uint32_t g_breadcrumbMagic;
 char g_lastHangOp[24] = "";     // breadcrumb from before the last reset (reported once)
 char g_lastBuiltMotion[12] = ""; // motion_state of the most recently built telemetry payload
+// 1NCE UDP health: sends since the last HTTPS heartbeat, consecutive local
+// send failures, the server's report of when a datagram last ARRIVED
+// (udp_age_s; -2 = no report yet), and the HTTPS-only cooldown deadline.
+uint32_t g_udpSentSinceHb = 0;
+uint32_t g_udpFailStreak = 0;
+long g_lastServerUdpAgeS = -2;
+uint32_t g_udpDisabledUntilMs = 0;
 const char* g_resetReason = ""; // why the board last reset (sw/panic/brownout/poweron)
 #define CRUMB(s) do { strncpy(g_breadcrumb, (s), sizeof(g_breadcrumb) - 1); g_breadcrumb[sizeof(g_breadcrumb) - 1] = 0; } while (0)
 
@@ -1267,6 +1274,9 @@ void handleTelemetryResponse(const String& respBodyIn) {
     Serial.print("OTA available: v"); Serial.println(otaVer);
     downloadAndApplyOta(String(otaVer), otaSize, String(otaMd5));
   }
+  if (!respDoc["udp_age_s"].isNull()) {
+    g_lastServerUdpAgeS = respDoc["udp_age_s"].as<long>();
+  }
   if (!lastGpsQualityFix && !respDoc["wifi_location"]["lat"].isNull()) {
     const float wLat = respDoc["wifi_location"]["lat"].as<float>();
     const float wLon = respDoc["wifi_location"]["lon"].as<float>();
@@ -1716,6 +1726,13 @@ String buildTelemetry(bool compact = false) {
   doc["battery_mv"] = batteryMv;
   doc["queued_messages"] = queueCount;
   doc["boot_count"] = g_bootCount;  // cheap + tracks brownout resets — kept even compact
+#if TRACKER_USE_NCE_UDP
+  // UDP health diagnostics — visible in the app's device.raw without a serial
+  // cable. fail_streak >0 = local CAOPEN/CASEND failures (DNS/session);
+  // udp_cooldown = server-confirmed blackhole latch is active.
+  if (g_udpFailStreak > 0) doc["udp_fail_streak"] = g_udpFailStreak;
+  if ((int32_t)(millis() - g_udpDisabledUntilMs) < 0) doc["udp_cooldown"] = true;
+#endif
   if (!compact) {
     doc["hardware_id"] = trackerHardwareId();
     doc["uptime_ms"] = nowMs;
@@ -1853,14 +1870,22 @@ bool postUdp1nce(const String& body) {
   sendSimpleAt("+CASSLCFG=0,ssl,0", 2000);   // make sure no SSL config lingers on it
   sendSimpleAt("+CASSLCFG=0,protocol,1", 2000);  // 1 = UDP on this CA-app firmware
 
+  // Hostname first, then the known 1NCE-internal IPs: some PDP sessions'
+  // modem DNS can't resolve udp.os.1nce.com (field: every open failed and the
+  // tracker burned TLS fallbacks all day).
+  const char* targets[] = { TRACKER_NCE_UDP_HOST, TRACKER_NCE_UDP_IP1, TRACKER_NCE_UDP_IP2 };
   String line;
-  drainSerialAt();
-  SerialAT.print("AT+CAOPEN=0,\"" TRACKER_NCE_UDP_HOST "\",");
-  SerialAT.print(TRACKER_NCE_UDP_PORT); SerialAT.print("\r\n");
-  bool opened = waitForLineContaining("+CAOPEN:", line, 15000);
-  if (opened) {
-    const int c = line.lastIndexOf(',');
-    opened = c >= 0 && line.substring(c + 1).toInt() == 0;
+  bool opened = false;
+  for (int t = 0; t < 3 && !opened; t++) {
+    drainSerialAt();
+    SerialAT.print("AT+CAOPEN=0,\""); SerialAT.print(targets[t]); SerialAT.print("\",");
+    SerialAT.print(TRACKER_NCE_UDP_PORT); SerialAT.print("\r\n");
+    opened = waitForLineContaining("+CAOPEN:", line, 15000);
+    if (opened) {
+      const int c = line.lastIndexOf(',');
+      opened = c >= 0 && line.substring(c + 1).toInt() == 0;
+    }
+    if (!opened && t > 0) sendSimpleAt("+CACLOSE=0", 1000);
   }
   if (!opened) {
     // Some SIM7000 firmware revisions want the full documented form instead.
@@ -1875,6 +1900,7 @@ bool postUdp1nce(const String& body) {
   }
   if (!opened) {
     Serial.println("UDP: CAOPEN failed");
+    g_udpFailStreak++;
     sendSimpleAt("+CACLOSE=0", 2000);
     sendSimpleAt("+CASSLCFG=0,protocol,0", 2000);  // restore TCP for the TLS paths
     return false;
@@ -1896,7 +1922,13 @@ bool postUdp1nce(const String& body) {
   // cid 0 is shared with the raw-TLS and OTA paths — leave it back on TCP so a
   // later CAOPEN from those paths doesn't inherit UDP mode.
   sendSimpleAt("+CASSLCFG=0,protocol,0", 2000);
-  if (!sent) Serial.println("UDP: CASEND not confirmed");
+  if (!sent) {
+    Serial.println("UDP: CASEND not confirmed");
+    g_udpFailStreak++;
+  } else {
+    g_udpFailStreak = 0;
+    g_udpSentSinceHb++;
+  }
   return sent;
 }
 #endif  // TRACKER_USE_NCE_UDP
@@ -1914,6 +1946,17 @@ bool postTelemetry(const String& body, bool forceReliable = false) {
     Serial.println("NCE: HTTPS heartbeat (full payload)");
     if (postJson(buildTelemetry(false))) {
       lastHeartbeatMs = now;
+      // Blackhole detector: we sent plenty of datagrams since the last
+      // heartbeat, yet the server's response says none have arrived recently
+      // (or ever) — 1NCE isn't routing this session to the UDP endpoint.
+      // Post via HTTPS for the cooldown instead of feeding a dead pipe.
+      if (g_udpSentSinceHb >= 5 &&
+          (g_lastServerUdpAgeS < 0 ||
+           g_lastServerUdpAgeS * 1000L > (long)(TRACKER_NCE_HTTPS_HEARTBEAT_MS + 180000UL))) {
+        g_udpDisabledUntilMs = now + TRACKER_NCE_UDP_COOLDOWN_MS;
+        Serial.println("NCE: server sees no UDP arrivals — HTTPS-only for 60 min");
+      }
+      g_udpSentSinceHb = 0;
       return true;
     }
     // Heartbeat failed — fall through to UDP so live tracking continues; the
@@ -1928,9 +1971,12 @@ bool postTelemetry(const String& body, bool forceReliable = false) {
     Serial.println("NCE: motion transition — reliable HTTPS post");
     if (postJson(body)) return true;
   }
-  if (body.length() <= TRACKER_NCE_UDP_MAX_PAYLOAD && postUdp1nce(body)) return true;
+  // Respect the blackhole cooldown — UDP sends would "succeed" locally and
+  // never arrive, so go straight to HTTPS until it expires.
+  const bool udpAllowed = (int32_t)(millis() - g_udpDisabledUntilMs) >= 0;
+  if (udpAllowed && body.length() <= TRACKER_NCE_UDP_MAX_PAYLOAD && postUdp1nce(body)) return true;
   if (forceReliable) return false;  // already tried HTTPS above
-  Serial.println("NCE: UDP unavailable — HTTPS fallback for this post");
+  if (udpAllowed) Serial.println("NCE: UDP unavailable — HTTPS fallback for this post");
   return postJson(body);
 #else
   (void)forceReliable;  // HTTPS is already reliable + ordered

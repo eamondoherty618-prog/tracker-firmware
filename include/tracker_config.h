@@ -20,7 +20,7 @@
 #ifndef TRACKER_API_KEY
 #define TRACKER_API_KEY "c5cc56a23546eb487223fe810ae8a8b76d83376ee09140f7"
 #endif
-#define TRACKER_FIRMWARE_VERSION "0.10.2"
+#define TRACKER_FIRMWARE_VERSION "0.10.3"
 
 // VESTIGIAL: alternator-voltage ignition detection. This hardware uses a 12V→5V buck
 // with no voltage sense, and AT+CBC only reads the buffer LiPo (~3.8V), so these can
@@ -74,9 +74,18 @@
 #define TRACKER_USE_NCE_UDP 1
 #endif
 #define TRACKER_NCE_UDP_HOST "udp.os.1nce.com"
+// DNS fallbacks — the hostname resolves to 1NCE-internal IPs that some PDP
+// sessions' modem DNS fails to resolve (field: truck fell back to HTTPS every
+// post). 1NCE says these can change, so hostname is tried first.
+#define TRACKER_NCE_UDP_IP1 "10.60.2.239"
+#define TRACKER_NCE_UDP_IP2 "10.60.8.90"
 #define TRACKER_NCE_UDP_PORT 4445
 #define TRACKER_NCE_UDP_MAX_PAYLOAD 508   // documented max safe UDP payload
 #define TRACKER_NCE_HTTPS_HEARTBEAT_MS 900000UL  // 15 min
+// When the server reports our datagrams aren't arriving (1NCE session not
+// UDP-routed — seen twice in the field), post via HTTPS for this long before
+// retrying UDP.
+#define TRACKER_NCE_UDP_COOLDOWN_MS 3600000UL  // 60 min
 
 #define TRACKER_GNSS_WARMUP_MS 45000UL
 #define TRACKER_GNSS_STATUS_LOG_MS 30000UL
