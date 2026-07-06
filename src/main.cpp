@@ -105,6 +105,7 @@ volatile uint32_t g_loopBeat = 0;
 RTC_NOINIT_ATTR char g_breadcrumb[24];
 RTC_NOINIT_ATTR uint32_t g_breadcrumbMagic;
 char g_lastHangOp[24] = "";     // breadcrumb from before the last reset (reported once)
+char g_lastBuiltMotion[12] = ""; // motion_state of the most recently built telemetry payload
 const char* g_resetReason = ""; // why the board last reset (sw/panic/brownout/poweron)
 #define CRUMB(s) do { strncpy(g_breadcrumb, (s), sizeof(g_breadcrumb) - 1); g_breadcrumb[sizeof(g_breadcrumb) - 1] = 0; } while (0)
 
@@ -1705,7 +1706,11 @@ String buildTelemetry(bool compact = false) {
   doc["firmware"] = TRACKER_FIRMWARE_VERSION;
   doc["has_fix"] = hasFix;
   doc["fix_source"] = qualityFix ? "GPS" : (hasFix ? "GPS_MARGINAL" : "None");
-  doc["motion_state"] = hasFix ? motionState(speedKph) : "unknown";
+  const String motion = hasFix ? motionState(speedKph) : String("unknown");
+  doc["motion_state"] = motion;
+  // Exposed so the loop can detect parked↔moving transitions and send those
+  // reports over reliable HTTPS instead of fire-and-forget UDP.
+  strlcpy(g_lastBuiltMotion, motion.c_str(), sizeof(g_lastBuiltMotion));
   doc["ignition_on"] = ignitionOn;
   doc["cell_rssi"] = rssi;
   doc["battery_mv"] = batteryMv;
@@ -1901,7 +1906,7 @@ bool postUdp1nce(const String& body) {
 // OTA offer comes back in its response); everything between heartbeats goes as one
 // UDP datagram, falling back to HTTPS whenever UDP can't send or the payload can't
 // fit the datagram. On normal builds this is just postJson().
-bool postTelemetry(const String& body) {
+bool postTelemetry(const String& body, bool forceReliable = false) {
 #if TRACKER_USE_NCE_UDP
   static uint32_t lastHeartbeatMs = 0;
   const uint32_t now = millis();
@@ -1914,10 +1919,21 @@ bool postTelemetry(const String& body) {
     // Heartbeat failed — fall through to UDP so live tracking continues; the
     // heartbeat (and its OTA check) retries on the next cycle.
   }
+  // Motion-state transitions (parked↔moving) go over HTTPS: a lost UDP
+  // datagram here leaves the map showing the WRONG state until the next
+  // packet lands, which is exactly the "doesn't switch to moving" symptom.
+  // Steady-state reports stay on cheap UDP. If HTTPS fails (dead zone), fall
+  // through to UDP as a best-effort backup — the caller queues on false.
+  if (forceReliable) {
+    Serial.println("NCE: motion transition — reliable HTTPS post");
+    if (postJson(body)) return true;
+  }
   if (body.length() <= TRACKER_NCE_UDP_MAX_PAYLOAD && postUdp1nce(body)) return true;
+  if (forceReliable) return false;  // already tried HTTPS above
   Serial.println("NCE: UDP unavailable — HTTPS fallback for this post");
   return postJson(body);
 #else
+  (void)forceReliable;  // HTTPS is already reliable + ordered
   return postJson(body);
 #endif
 }
@@ -2377,9 +2393,17 @@ void loop() {
     // still goes out with every HTTPS heartbeat inside postTelemetry().
     const String payload = buildTelemetry(TRACKER_USE_NCE_UDP != 0);
 
+    // A parked↔moving change is the report the map can't afford to lose —
+    // route it over reliable HTTPS instead of fire-and-forget UDP.
+    static char lastSentMotion[12] = "";
+    const bool motionChanged =
+        lastSentMotion[0] != '\0' && strcmp(lastSentMotion, g_lastBuiltMotion) != 0;
+
     Serial.println(payload);
     CRUMB("postJson");
-    if (!postTelemetry(payload)) {
+    const bool posted = postTelemetry(payload, motionChanged);
+    if (posted) strlcpy(lastSentMotion, g_lastBuiltMotion, sizeof(lastSentMotion));
+    if (!posted) {
       Serial.println("Queueing telemetry");
       enqueue(payload);
       g_consecutivePostFails++;
