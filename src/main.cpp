@@ -2238,6 +2238,33 @@ void startBleAdvertising() {
   Serial.println("BLE: advertising as 123Track");
 }
 
+// ── Driver-presence advertising (provisioned trackers) ───────────────────────
+// The phone app proves who's in the vehicle by hearing this tracker over BLE,
+// so provisioned units advertise while ON A TRIP WITH A GPS FIX. The setup-only
+// restriction existed because BLE breaks WiFi.scanNetworks() — but WiFi-shortcut
+// geolocation only runs when there's NO fix, so gating on a fix keeps that
+// fallback intact: fix lost or trip over → advertising stops, radio freed.
+bool g_presenceBleInited = false;
+bool g_presenceBleOn = false;
+void updatePresenceAdvertising(bool shouldAdvertise) {
+  if (!g_provisioned) return;  // unclaimed boards advertise from setup() instead
+  if (shouldAdvertise == g_presenceBleOn) return;
+  if (shouldAdvertise) {
+    if (!g_presenceBleInited) {
+      startBleAdvertising();  // one-time stack init (bluedroid deinit is unreliable)
+      g_presenceBleInited = true;
+    } else {
+      updateBleDevInfo();
+      BLEDevice::startAdvertising();
+    }
+    Serial.println("BLE: presence advertising ON (trip + fix)");
+  } else {
+    BLEDevice::getAdvertising()->stop();
+    Serial.println("BLE: presence advertising OFF");
+  }
+  g_presenceBleOn = shouldAdvertise;
+}
+
 // Fires every 60s. If the loop heartbeat hasn't advanced across 3 checks (~180s),
 // the main loop is hung — force a reboot. 180s clears the longest legit blocking
 // call (waitForNetwork is 120s) so it won't false-trip.
@@ -2409,6 +2436,10 @@ void loop() {
     lastBleUpdateMs = nowMs;
     updateBleDevInfo();
   }
+
+  // Driver-presence: advertise over BLE while on a trip with a GPS fix so the
+  // driver's phone can identify this vehicle (see updatePresenceAdvertising).
+  updatePresenceAdvertising(ignitionOn && lastGpsFix);
 
   // Wake-on-motion: while parked the telemetry interval stretches to a 10-min
   // heartbeat. There's no alternator-voltage signal on this hardware, so poll GPS
