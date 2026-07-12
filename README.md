@@ -2,8 +2,12 @@
 
 Production firmware for the in-vehicle GPS trackers behind
 [123 Mobile Track](https://github.com/eamondoherty618-prog/123-mobile-track).
-Current release: **v0.10.4** (see tags; `v0.9.48-known-good` is the fallback
+Current release: **v0.10.5** (see tags; `v0.9.48-known-good` is the fallback
 baseline).
+
+**Setting up new trackers?** See [DEPLOYMENT.md](DEPLOYMENT.md) — one generic
+factory image, self-assigned identity from the chip MAC, Bluetooth adoption in
+the app, and SD-card re-flash in the field.
 
 ## What it does
 
@@ -34,7 +38,9 @@ baseline).
 | Path | What it is |
 |---|---|
 | `src/`, `include/` | The firmware. Config in `include/tracker_config.h`. |
-| `platformio.ini` | Build config (PlatformIO, ESP32). |
+| `platformio.ini` | Build config (PlatformIO, ESP32). `factory` env = the generic new-board image. |
+| `flash_new_tracker.sh` | Bench-flash a new board, print its identity, log to `fleet_inventory.csv`. |
+| `make_sd_card.sh` | Write a microSD recovery/update card (field re-flash, no laptop). |
 | `deploy_firmware.sh`, `package_firmware.sh` | Build + publish a release to the app's OTA store. |
 | `frontend/`, `server/`, `deploy/`, `tools/` | **Legacy bench prototype** — the production app lives in the `123-mobile-track` repo. Kept for reference. |
 

@@ -4,11 +4,12 @@
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
-#include <DNSServer.h>
+#include <MD5Builder.h>
 #include <Preferences.h>
+#include <SD.h>
+#include <SPI.h>
 #include <TinyGsmClient.h>
 #include <Update.h>
-#include <WebServer.h>
 #include <WiFi.h>
 
 #include "tracker_config.h"
@@ -26,6 +27,13 @@ constexpr int MODEM_RX = 26;
 constexpr int MODEM_PWRKEY = 4;
 constexpr int MODEM_BAUD = 115200;
 
+// Onboard microSD slot (SPI). Used only at boot to look for a firmware.bin to
+// self-flash — the field-recovery path when a unit can't be reached over USB.
+constexpr int SD_SCLK = 14;
+constexpr int SD_MISO = 2;
+constexpr int SD_MOSI = 15;
+constexpr int SD_CS   = 13;
+
 constexpr size_t QUEUE_DEPTH = 24;
 
 HardwareSerial SerialAT(1);
@@ -37,6 +45,12 @@ TinyGsmClientSecure secureClient(modem, 0);
 String g_deviceId;
 String g_apiKey;
 bool g_provisioned = false;
+// Adoption latch (NVS-persisted, server-driven): false until the server's
+// telemetry response reports this device is assigned to a vehicle in some org.
+// Unadopted boards advertise over BLE continuously so the app can claim them;
+// adopted boards only advertise while on a trip (driver presence). Un-claiming
+// the device in the app flips this back and the board becomes adoptable again.
+bool g_adopted = false;
 
 struct QueuedMessage {
   String body;
@@ -1257,8 +1271,10 @@ bool ensureClientConnected() {
   return true;
 }
 
-// Shared: harvest an OTA offer and/or a WiFi-geolocation fix from the server's reply.
-// Used by both the native (SHREQ) and raw-TLS POST paths.
+// Shared: harvest an OTA offer, adoption state, and/or a WiFi-geolocation fix
+// from the server's reply. Used by both the native (SHREQ) and raw-TLS POST paths.
+void updateAdoptionFromServer(bool adoptedNow);  // defined with the BLE code below
+
 void handleTelemetryResponse(const String& respBodyIn) {
   const int jsonIdx = respBodyIn.indexOf('{');
   if (jsonIdx < 0) return;
@@ -1266,6 +1282,12 @@ void handleTelemetryResponse(const String& respBodyIn) {
 
   JsonDocument respDoc;
   if (deserializeJson(respDoc, respBody) != DeserializationError::Ok) return;
+
+  // Adoption latch: the server says whether this device is assigned to a
+  // vehicle in some org. Absent field (old server, error path) = no change.
+  if (respDoc["adopted"].is<bool>()) {
+    updateAdoptionFromServer(respDoc["adopted"].as<bool>());
+  }
 
   const char* otaVer = respDoc["ota"]["version"] | "";
   const int otaSize = respDoc["ota"]["size"] | 0;
@@ -2009,12 +2031,14 @@ void loadCredentials() {
   prefs.begin("tracker", true);
   g_deviceId = prefs.getString("device_id", "");
   g_apiKey   = prefs.getString("api_key",   "");
+  g_adopted  = prefs.getBool("adopted", false);
   prefs.end();
   g_provisioned = g_deviceId.length() > 0 && g_apiKey.length() > 0;
   if (g_provisioned) {
-    Serial.print("Provisioned as: "); Serial.println(g_deviceId);
+    Serial.print("Provisioned as: "); Serial.print(g_deviceId);
+    Serial.println(g_adopted ? " (adopted)" : " (awaiting adoption — BLE claimable)");
   } else {
-    Serial.println("Not provisioned — will enter setup mode.");
+    Serial.println("Not provisioned — will self-provision from efuse MAC.");
   }
 }
 
@@ -2029,188 +2053,95 @@ void saveCredentials(const String& deviceId, const String& apiKey) {
   g_provisioned = true;
 }
 
-// ─── Cellular helpers for provisioning calls ─────────────────────────────────
-
-// Send a GET or POST via CAOPEN/CASEND to the Lambda relay.
-// Returns the HTTP response body (empty on failure).
-String cellularRequest(const char* method, const String& path, const String& body = "") {
-  connectGprs();
-  if (!gprsConnected) return "";
-
-  sendSimpleAt("+CACLOSE=0", 2000);
-  if (!sendSimpleAt("+CACID=0", 5000)) return "";
-  sendSimpleAt("+CSSLCFG=\"sslversion\",0,3", 5000);
-  sendSimpleAt("+CSSLCFG=\"ignorertctime\",0,1", 5000);
-  sendSimpleAt("+CASSLCFG=0,ssl,1", 5000);
-  sendAtAndWaitForToken("+CSSLCFG=\"ctxindex\",0", "+CSSLCFG:", 5000);
-  waitForOkVerbose(5000, "ctxindex");
-  sendSimpleAt("+CASSLCFG=0,protocol,0", 5000);
-  sendSimpleAt(String("+CSSLCFG=\"sni\",0,\"") + TRACKER_SERVER_HOST + "\"", 5000);
-
-  String request = String(method) + " " + path + " HTTP/1.1\r\nHost: " +
-                   TRACKER_SERVER_HOST + "\r\nUser-Agent: tracker-setup/" +
-                   TRACKER_FIRMWARE_VERSION + "\r\nConnection: close\r\n";
-  if (body.length() > 0) {
-    request += "Content-Type: application/json\r\nContent-Length: ";
-    request += body.length();
-    request += "\r\n";
-  }
-  request += "\r\n";
-  request += body;
-
-  String matchedLine;
-  drainSerialAt();
-  SerialAT.print("AT+CAOPEN=0,\""); SerialAT.print(TRACKER_SERVER_HOST);
-  SerialAT.print("\","); SerialAT.print(TRACKER_SERVER_PORT); SerialAT.print("\r\n");
-  if (!waitForLineContaining("+CAOPEN:", matchedLine, 75000)) { return ""; }
-  const int comma = matchedLine.lastIndexOf(',');
-  if (comma < 0 || matchedLine.substring(comma + 1).toInt() != 0) {
-    sendSimpleAt("+CACLOSE=0", 3000); return "";
-  }
-
-  drainSerialAt();
-  SerialAT.print("AT+CASEND=0,"); SerialAT.print(request.length()); SerialAT.print("\r\n");
-  if (!waitForPromptChar('>', 10000)) { sendSimpleAt("+CACLOSE=0", 3000); return ""; }
-  SerialAT.write(reinterpret_cast<const uint8_t*>(request.c_str()), request.length());
-  SerialAT.write(0x1A); SerialAT.flush();
-  if (!waitForCasendComplete(30000)) {
-    sendSimpleAt("+CACLOSE=0", 3000); return "";
-  }
-
-  delay(1500);
-  drainSerialAt();
-  SerialAT.print("AT+CARECV=0,1024\r\n");
-  if (!waitForLineContaining("+CARECV:", matchedLine, 15000)) {
-    sendSimpleAt("+CACLOSE=0", 5000); return "";
-  }
-
-  // Collect the response body (JSON is after the blank header line).
-  String responseBody;
-  waitForLineContaining("{", responseBody, 5000);
-  sendSimpleAt("+CACLOSE=0", 5000);
-  return responseBody;
+void saveAdopted(bool adopted) {
+  Preferences prefs;
+  prefs.begin("tracker", false);
+  prefs.putBool("adopted", adopted);
+  prefs.end();
+  g_adopted = adopted;
 }
 
-// ─── Provisioning mode (WiFi AP + captive portal + cellular poll) ────────────
+// Factory identity: tracker-<last 6 hex of the efuse MAC>. ESP.getEfuseMac()
+// packs the 6 MAC octets little-endian (byte 0 = first octet), so octets
+// 3..5 — the ones printed last by esptool during flashing — are bytes 3..5.
+// flash_new_tracker.sh derives the same ID from esptool's MAC line, so the
+// label printed at the flash station always matches what the board calls itself.
+String factoryDeviceId() {
+  const uint64_t mac = ESP.getEfuseMac();
+  char id[20];
+  snprintf(id, sizeof(id), "tracker-%02x%02x%02x",
+           static_cast<uint8_t>(mac >> 24),
+           static_cast<uint8_t>(mac >> 32),
+           static_cast<uint8_t>(mac >> 40));
+  return String(id);
+}
 
-static const char CAPTIVE_HTML[] PROGMEM = R"html(<!DOCTYPE html>
-<html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>123 Mobile Track Setup</title>
-<style>
-  body{font-family:-apple-system,sans-serif;background:#f4f7f4;display:flex;
-    align-items:center;justify-content:center;min-height:100vh;margin:0;padding:16px;box-sizing:border-box}
-  .card{background:#fff;border-radius:16px;padding:28px 24px;max-width:360px;
-    width:100%;box-shadow:0 4px 24px rgba(0,0,0,.10);text-align:center}
-  h1{color:#1a2e1a;font-size:1.3rem;margin:0 0 6px}
-  .sub{color:#64748b;font-size:.85rem;line-height:1.5;margin:0 0 20px}
-  .hw{font-family:monospace;background:#f1f5f9;border-radius:8px;
-    padding:10px 16px;font-size:1.1rem;color:#1a2e1a;display:block;margin:0 0 20px;letter-spacing:.05em}
-  .steps{text-align:left;background:#f8faf8;border-radius:10px;padding:14px 16px;margin:0 0 20px}
-  .steps p{color:#374151;font-size:.82rem;line-height:1.6;margin:0}
-  .steps b{color:#1a2e1a}
-  button.btn,a.btn{display:block;width:100%;background:#1a2e1a;color:#fff;padding:13px 20px;
-    border-radius:10px;text-decoration:none;font-weight:600;font-size:.95rem;
-    border:none;cursor:pointer;box-sizing:border-box;margin-bottom:10px}
-  button.btn:active,a.btn:active{opacity:.85}
-  .note{color:#94a3b8;font-size:.78rem;margin:0}
-  #copied{color:#16a34a;font-size:.82rem;margin:8px 0 0;display:none}
-</style></head>
-<body><div class="card">
-  <h1>123 Mobile Track</h1>
-  <p class="sub">New tracker detected</p>
-  <div class="hw">__HWID__</div>
-  <p style="margin:0 0 8px;font-size:.82rem;color:#64748b">Tap the link below to select it, then copy and paste it into your browser&rsquo;s <b>address bar</b> after disconnecting from this WiFi.</p>
-  <textarea id="url" onclick="this.select()" readonly rows="2"
-    style="width:100%;box-sizing:border-box;font-family:monospace;font-size:.78rem;padding:10px;border-radius:8px;border:2px solid #1a2e1a;background:#f8faf8;color:#1a2e1a;resize:none;-webkit-user-select:all;user-select:all">https://123mobiletrack.com/devices/add?hw=__HWID__</textarea>
-  <button class="btn" style="margin-top:10px" onclick="
-    var t=document.getElementById('url');
-    t.select();t.setSelectionRange(0,999);
-    try{document.execCommand('copy');document.getElementById('copied').style.display='block';}catch(e){}
-  ">Copy link</button>
-  <div id="copied" style="color:#16a34a;font-size:.82rem;margin:6px 0 0;display:none">Copied! Now disconnect from this WiFi and paste in your browser address bar.</div>
-  <p class="note" style="margin-top:10px">Hardware ID: __HWID__</p>
-</div></body></html>)html";
+// ─── SD-card self-flash ──────────────────────────────────────────────────────
+// Field recovery/update without a laptop: put firmware.bin on a microSD card,
+// insert, power-cycle. The board flashes it and reboots. An NVS marker with the
+// file's MD5 prevents a re-flash loop (the same card can stay inserted); to
+// force a re-apply of an identical binary, replace the file (any byte change)
+// or erase NVS. Runs before anything network-related so even a unit whose
+// modem/credential state is wrecked can be recovered.
 
-void runProvisioningMode() {
-  const String hwId = trackerHardwareId();
-  const String ssid = String("123Track-") + hwId.substring(hwId.length() - 4);
-  Serial.print("Starting provisioning WiFi AP: "); Serial.println(ssid);
-
-  // Register as pending via cellular.
-  const String initBody = String("{\"hardware_id\":\"") + hwId + "\"}";
-  const String initResp = cellularRequest("POST", "/api/fleet/provision/init", initBody);
-  Serial.print("Provision init: "); Serial.println(initResp.length() ? initResp : "(no response)");
-
-  // Start WiFi AP.
-  WiFi.mode(WIFI_AP);
-  WiFi.softAP(ssid.c_str());
-  delay(500);
-  Serial.print("AP IP: "); Serial.println(WiFi.softAPIP());
-
-  // DNS server — redirect everything to 192.168.4.1 for captive portal.
-  DNSServer dns;
-  dns.start(53, "*", WiFi.softAPIP());
-
-  // Web server — serve the setup page and handle captive portal probes.
-  WebServer server(80);
-  String htmlPage = String(CAPTIVE_HTML);
-  htmlPage.replace("__HWID__", hwId);
-  htmlPage.replace("__HWID__", hwId); // replace both occurrences
-
-  auto servePage = [&]() { server.send(200, "text/html", htmlPage); };
-  auto redirect  = [&]() { server.sendHeader("Location", "http://192.168.4.1/"); server.send(302); };
-  server.on("/",                    HTTP_GET, servePage);   // portal page
-  server.on("/hotspot-detect.html", HTTP_GET, redirect);   // iOS — redirect triggers CNA popup
-  server.on("/success.html",        HTTP_GET, redirect);   // iOS alt
-  server.on("/generate_204",        HTTP_GET, redirect);   // Android
-  server.on("/gen_204",             HTTP_GET, redirect);   // Android alt
-  server.on("/ncsi.txt",            HTTP_GET, redirect);   // Windows
-  server.on("/connecttest.txt",     HTTP_GET, redirect);   // Windows
-  server.on("/redirect",            HTTP_GET, redirect);
-  server.onNotFound(redirect);                             // catch-all → redirect to portal
-  server.begin();
-
-  Serial.println("Waiting to be claimed... (polls cellular every 15s)");
-
-  uint32_t lastPollMs = millis(); // delay first poll so web server can respond immediately
-  const uint32_t POLL_INTERVAL = 15000;
-
-  while (true) {
-    dns.processNextRequest();
-    server.handleClient();
-
-    const uint32_t now = millis();
-    if (now - lastPollMs >= POLL_INTERVAL) {
-      lastPollMs = now;
-      // Flush any pending HTTP requests before blocking on cellular
-      const uint32_t flushEnd = millis() + 500;
-      while (millis() < flushEnd) { dns.processNextRequest(); server.handleClient(); delay(5); }
-      Serial.print("Polling for claim... ");
-      const String resp = cellularRequest("GET",
-        String("/api/fleet/provision/poll?hw=") + hwId);
-      Serial.println(resp.length() ? resp : "(no response)");
-
-      if (resp.indexOf("\"claimed\":true") >= 0) {
-        // Parse device_id and api_key from the JSON response.
-        JsonDocument doc;
-        if (deserializeJson(doc, resp) == DeserializationError::Ok) {
-          const String newDeviceId = doc["device_id"].as<String>();
-          const String newApiKey   = doc["api_key"].as<String>();
-          if (newDeviceId.length() > 0 && newApiKey.length() > 0) {
-            Serial.print("Claimed! Device ID: "); Serial.println(newDeviceId);
-            saveCredentials(newDeviceId, newApiKey);
-            server.stop(); dns.stop(); WiFi.softAPdisconnect(true);
-            delay(1000);
-            Serial.println("Rebooting into tracking mode...");
-            ESP.restart();
-          }
-        }
-      }
-    }
-
-    delay(10);
+void trySdFirmwareUpdate() {
+  SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
+  if (!SD.begin(SD_CS)) { SPI.end(); return; }  // no card inserted — the normal case
+  File f = SD.open("/firmware.bin", FILE_READ);
+  if (!f || f.size() < 100000) {  // sanity floor: a real build is ~1MB+
+    if (f) f.close();
+    SD.end(); SPI.end();
+    return;
   }
+  Serial.print("SD: found /firmware.bin ("); Serial.print(f.size()); Serial.println(" bytes)");
+
+  MD5Builder md5;
+  md5.begin();
+  static uint8_t buf[4096];
+  size_t n;
+  while ((n = f.read(buf, sizeof(buf))) > 0) md5.add(buf, n);
+  md5.calculate();
+  const String fileMd5 = md5.toString();
+
+  Preferences prefs;
+  prefs.begin("sdota", false);
+  if (prefs.getString("applied", "") == fileMd5) {
+    prefs.end(); f.close(); SD.end(); SPI.end();
+    Serial.println("SD: firmware.bin already applied — skipping");
+    return;
+  }
+
+  // Optional sidecar integrity check: firmware.md5 written by make_sd_card.sh.
+  // A mismatch means the copy to the card was corrupted — refuse to flash it.
+  File m = SD.open("/firmware.md5", FILE_READ);
+  if (m) {
+    String expect = m.readStringUntil('\n');
+    m.close();
+    expect.trim();
+    if (expect.length() == 32 && !expect.equalsIgnoreCase(fileMd5)) {
+      prefs.end(); f.close(); SD.end(); SPI.end();
+      Serial.println("SD: firmware.bin MD5 mismatch vs firmware.md5 — corrupt copy, not flashing");
+      return;
+    }
+  }
+
+  Serial.println("SD: flashing new firmware...");
+  f.seek(0);
+  bool ok = Update.begin(f.size());
+  if (ok) {
+    ok = Update.writeStream(f) == f.size() && Update.end();
+  }
+  if (ok) {
+    prefs.putString("applied", fileMd5);
+    prefs.end(); f.close(); SD.end(); SPI.end();
+    Serial.println("SD: flash complete — rebooting into new firmware");
+    delay(200);
+    ESP.restart();
+  }
+  Update.abort();
+  prefs.end(); f.close(); SD.end(); SPI.end();
+  Serial.print("SD: flash FAILED (error "); Serial.print(Update.getError());
+  Serial.println(") — continuing boot on current firmware");
 }
 
 void updateBleDevInfo() {
@@ -2221,6 +2152,9 @@ void updateBleDevInfo() {
     trackerDeviceId().c_str(), TRACKER_FIRMWARE_VERSION, g_lastBattMv);
   g_bleDevInfoChar->setValue(std::string(buf));
 }
+
+bool g_presenceBleInited = false;  // bluedroid stack is up (deinit is unreliable — init once)
+bool g_presenceBleOn = false;
 
 void startBleAdvertising() {
   BLEDevice::init("123Track");
@@ -2235,24 +2169,22 @@ void startBleAdvertising() {
   adv->setScanResponse(true);
   adv->setMinPreferred(0x06);
   BLEDevice::startAdvertising();
+  g_presenceBleInited = true;
   Serial.println("BLE: advertising as 123Track");
 }
 
-// ── Driver-presence advertising (provisioned trackers) ───────────────────────
+// ── Driver-presence advertising (adopted trackers) ───────────────────────────
 // The phone app proves who's in the vehicle by hearing this tracker over BLE,
-// so provisioned units advertise while ON A TRIP WITH A GPS FIX. The setup-only
-// restriction existed because BLE breaks WiFi.scanNetworks() — but WiFi-shortcut
+// so adopted units advertise while ON A TRIP WITH A GPS FIX. The trip-only
+// restriction exists because BLE breaks WiFi.scanNetworks() — but WiFi-shortcut
 // geolocation only runs when there's NO fix, so gating on a fix keeps that
 // fallback intact: fix lost or trip over → advertising stops, radio freed.
-bool g_presenceBleInited = false;
-bool g_presenceBleOn = false;
 void updatePresenceAdvertising(bool shouldAdvertise) {
-  if (!g_provisioned) return;  // unclaimed boards advertise from setup() instead
+  if (!g_adopted) return;  // unadopted boards already advertise continuously for claiming
   if (shouldAdvertise == g_presenceBleOn) return;
   if (shouldAdvertise) {
     if (!g_presenceBleInited) {
       startBleAdvertising();  // one-time stack init (bluedroid deinit is unreliable)
-      g_presenceBleInited = true;
     } else {
       updateBleDevInfo();
       BLEDevice::startAdvertising();
@@ -2263,6 +2195,30 @@ void updatePresenceAdvertising(bool shouldAdvertise) {
     Serial.println("BLE: presence advertising OFF");
   }
   g_presenceBleOn = shouldAdvertise;
+}
+
+// Server-driven adoption latch (see g_adopted). Called from every parsed
+// telemetry/heartbeat response that carries an "adopted" field.
+void updateAdoptionFromServer(bool adoptedNow) {
+  if (adoptedNow == g_adopted) return;
+  saveAdopted(adoptedNow);
+  if (adoptedNow) {
+    // Claimed in the app: stop the continuous setup advertising. From here on
+    // updatePresenceAdvertising() owns the radio (trip + fix only).
+    if (g_presenceBleInited) BLEDevice::getAdvertising()->stop();
+    g_presenceBleOn = false;
+    Serial.println("BLE: adopted by an account — setup advertising off");
+  } else {
+    // Un-claimed in the app: become adoptable again.
+    if (g_presenceBleInited) {
+      updateBleDevInfo();
+      BLEDevice::startAdvertising();
+    } else {
+      startBleAdvertising();
+    }
+    g_presenceBleOn = false;
+    Serial.println("BLE: un-adopted — advertising continuously for claiming");
+  }
 }
 
 // Fires every 60s. If the loop heartbeat hasn't advanced across 3 checks (~180s),
@@ -2332,12 +2288,32 @@ void setup() {
   timerAlarmWrite(g_loopWdt, 60000000ULL, true);
   timerAlarmEnable(g_loopWdt);
 
+  // Field recovery/update: if a microSD card with a (new) firmware.bin is
+  // inserted, flash it and reboot. Checked before anything else so a unit with
+  // a wrecked modem or credential state can still be revived with just a card.
+  trySdFirmwareUpdate();
+
   loadCredentials();
-  // BLE advertising is setup-only (claiming a new tracker). Provisioned trackers
-  // MUST skip it: BLE and WiFi share the ESP32's 2.4GHz radio, and running BLE
-  // kills WiFi.scanNetworks() — which breaks WiFi-shortcut geolocation (the
-  // location source when there's no GPS fix). Only unclaimed trackers advertise.
-  if (!g_provisioned) startBleAdvertising();
+  if (!g_provisioned) {
+    // First boot. Boards flashed with an explicit -D TRACKER_DEVICE_ID (the
+    // fleet envs) persist those credentials; factory-image boards name
+    // themselves from the efuse MAC. Either way the identity lives in NVS from
+    // here on, so OTA updates never change it.
+    if (String(TRACKER_DEVICE_ID) != "unprovisioned" && String(TRACKER_DEVICE_ID).length() > 0) {
+      saveCredentials(String(TRACKER_DEVICE_ID), String(TRACKER_API_KEY));
+      Serial.print("Provisioned from compile-time flags as: "); Serial.println(g_deviceId);
+    } else {
+      saveCredentials(factoryDeviceId(), String(TRACKER_API_KEY));
+      Serial.print("Self-provisioned from efuse MAC as: "); Serial.println(g_deviceId);
+    }
+  }
+  // Unadopted trackers advertise over BLE continuously so the app can claim
+  // them (Devices → Add Device). Adopted trackers MUST NOT: BLE and WiFi share
+  // the ESP32's 2.4GHz radio, and running BLE kills WiFi.scanNetworks() — the
+  // location source when there's no GPS fix. Once the server's telemetry
+  // response reports adopted:true this stops for good (see g_adopted), and
+  // trip-time presence advertising takes over.
+  if (!g_adopted) startBleAdvertising();
 
   powerOnModem();
   SerialAT.begin(MODEM_BAUD, SERIAL_8N1, MODEM_RX, MODEM_TX);
@@ -2351,21 +2327,6 @@ void setup() {
   Serial.print("Modem: ");
   Serial.println(modem.getModemInfo());
   configureNetworkMode();
-
-  if (!g_provisioned) {
-    // Fall back to compile-time credentials if defined (legacy / pre-provisioned boards).
-    // New boards ship with TRACKER_DEVICE_ID="unprovisioned" and enter setup mode.
-    if (String(TRACKER_DEVICE_ID) != "unprovisioned" && String(TRACKER_DEVICE_ID).length() > 0) {
-      // Persist compile-time credentials to NVS so OTA updates preserve this tracker's identity.
-      saveCredentials(String(TRACKER_DEVICE_ID), String(TRACKER_API_KEY));
-      loadCredentials();
-      Serial.println("Saved compile-time credentials to NVS for OTA persistence.");
-    } else {
-      // No NVS credentials and no compile-time ID — enter WiFi AP provisioning mode.
-      // This never returns; ESP.restart() exits it after claim.
-      runProvisioningMode();
-    }
-  }
 
   logSimDiagnostics();
   connectGprs();
