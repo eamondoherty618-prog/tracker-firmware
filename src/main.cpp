@@ -2156,9 +2156,24 @@ void updateBleDevInfo() {
 bool g_presenceBleInited = false;  // bluedroid stack is up (deinit is unreliable — init once)
 bool g_presenceBleOn = false;
 
+// The stack stops advertising the moment a central connects (e.g. the app's
+// presence watcher or claim scan reading devinfo) and does NOT resume it on
+// disconnect — without this callback one background read from any phone made
+// the tracker permanently invisible (bench-found: Add Device saw nothing
+// because the owner's phone had already connected minutes earlier).
+class ReAdvertiseCallbacks : public BLEServerCallbacks {
+  void onDisconnect(BLEServer*) override {
+    if (!g_adopted || g_presenceBleOn) {
+      updateBleDevInfo();
+      BLEDevice::startAdvertising();
+    }
+  }
+};
+
 void startBleAdvertising() {
   BLEDevice::init("123Track");
   BLEServer*    server  = BLEDevice::createServer();
+  server->setCallbacks(new ReAdvertiseCallbacks());
   BLEService*   service = server->createService(FLEET_BLE_SERVICE_UUID);
   g_bleDevInfoChar = service->createCharacteristic(
     FLEET_BLE_DEVINFO_UUID, BLECharacteristic::PROPERTY_READ);
