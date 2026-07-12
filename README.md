@@ -1,113 +1,59 @@
-# LilyGo T-SIM7000G Fleet Tracker Prototype
+# 123 Mobile Track — Tracker Firmware (LilyGo T-SIM7000G)
 
-This is a first-pass cellular fleet tracker firmware for a LilyGo T-SIM7000G.
-It reads GNSS data from the SIM7000G modem, posts JSON telemetry to a server,
-and detects basic driving events from GPS speed changes.
+Production firmware for the in-vehicle GPS trackers behind
+[123 Mobile Track](https://github.com/eamondoherty618-prog/123-mobile-track).
+Current release: **v0.10.4** (see tags; `v0.9.48-known-good` is the fallback
+baseline).
 
-## What It Reports
+## What it does
 
-- Location, speed, altitude, and satellite count when GNSS has a fix
-- Moving/parked state
-- Hard braking and rapid acceleration events from speed deltas
-- Cellular signal quality
-- Battery voltage reported by the modem
-- Firmware version, uptime, and queued message count
+- **Telemetry over raw UDP through a 1NCE SIM** (fleet default since v0.10.1 —
+  a fraction of the data cost of per-post TLS handshakes), received server-side
+  via the 1NCE OS Cloud Integrator webhook. Out-of-order datagrams are dropped
+  server-side.
+- **HTTPS (modem-native `AT+SHREQ`) for what must be reliable**: motion
+  transitions, OTA checks, heartbeats — with a raw-TLS fallback latch and a
+  server-driven UDP-blackhole latch (`udp_age_s` in heartbeat responses).
+- **GPS-motion ignition detection.** There is no vehicle-voltage sense: power
+  is a 12V→5V buck and `AT+CBC` only reads the LiPo, so voltage-based ignition
+  is impossible on this hardware. The LiPo also buffers the SIM7000G's ~2A
+  bursts — a healthy battery matters; brownout is the prime reset suspect.
+- **WiFi-scan geolocation fallback** when GNSS has no fix (async, un-hangable).
+- **BLE presence advertising** while driving with a fix (v0.10.4) — the driver's
+  phone hears it and the app raises a driver-in-vehicle alert. Deliberately not
+  advertised without a fix, so the WiFi-scan fallback keeps working.
+- **OTA updates** from the web app: chunked download, MD5 integrity,
+  force-update support.
+- **Self-healing diagnostics**: hardware watchdog, hang breadcrumbs
+  (`last_hang_op` survives reset and is reported in telemetry), reset-reason
+  reporting, bounded network waits. This is how the mid-drive freeze was
+  cracked (v0.9.28–0.9.32).
 
-## Configure It
+## Layout
 
-Edit `include/tracker_config.h`:
+| Path | What it is |
+|---|---|
+| `src/`, `include/` | The firmware. Config in `include/tracker_config.h`. |
+| `platformio.ini` | Build config (PlatformIO, ESP32). |
+| `deploy_firmware.sh`, `package_firmware.sh` | Build + publish a release to the app's OTA store. |
+| `frontend/`, `server/`, `deploy/`, `tools/` | **Legacy bench prototype** — the production app lives in the `123-mobile-track` repo. Kept for reference. |
 
-- `TRACKER_APN`
-- `TRACKER_SERVER_HOST`
-- `TRACKER_SERVER_PORT`
-- `TRACKER_SERVER_PATH`
-- `TRACKER_DEVICE_ID`
-- `TRACKER_AUTH_TOKEN`
-
-Start with HTTP for bench testing. Use TLS, real per-device credentials, and a
-signed OTA path before installing this in real vehicles.
-
-## Build And Upload
-
-Install PlatformIO, then run:
-
-```sh
-pio run -t upload
-pio device monitor
-```
-
-The project is already set to use the detected serial port:
-
-```text
-/dev/cu.usbserial-59680313751
-```
-
-## Server Contract
-
-The firmware sends `POST /api/fleet/telemetry` with JSON:
-
-```json
-{
-  "device_id": "tracker-001",
-  "uptime_ms": 123456,
-  "firmware": "0.1.0",
-  "has_fix": true,
-  "motion_state": "moving",
-  "event": "hard_brake",
-  "cell_rssi": 21,
-  "battery_mv": 4100,
-  "queued_messages": 0,
-  "gps": {
-    "lat": 40.7128,
-    "lon": -74.006,
-    "speed_kph": 52.1,
-    "altitude_m": 12.3,
-    "satellites": 9
-  }
-}
-```
-
-## Run The Prototype Server
-
-This repo includes a no-dependency local receiver:
+## Build, flash, release
 
 ```sh
-python3 server/fleet_server.py --port 8080
+pio run                    # build
+pio run -t upload          # flash over USB
+./deploy_firmware.sh       # package + publish as an OTA release
 ```
 
-Open:
+Note: the OTA publish writes to Netlify Blobs and must run against the
+Netlify-linked `frontend/` directory of the **app repo**, not the legacy
+`frontend/` here — the script handles this, don't bypass it.
 
-```text
-http://localhost:8080
-```
+## Conventions
 
-Test it from the laptop:
-
-```sh
-curl -X POST http://localhost:8080/api/fleet/telemetry \
-  -H 'Content-Type: application/json' \
-  -d '{"device_id":"tracker-001","motion_state":"moving","gps":{"lat":40.7128,"lon":-74.0060,"speed_kph":33.2}}'
-```
-
-Packets are appended to:
-
-```text
-data/telemetry.jsonl
-```
-
-For the cellular board to reach this server from a SIM card, the server needs a
-public URL. A local laptop URL like `localhost` or `192.168.x.x` will not be
-reachable over the cellular network unless you use a tunnel or deploy the API.
-
-## Prototype Notes
-
-GPS speed is useful but not ideal for harsh-driving detection. Add an IMU for
-better hard braking, cornering, crash, tow, and vibration detection.
-
-For vehicle installation, add:
-
-- Fused 12 V to 5 V power conversion
-- Ignition or accessory-line sensing
-- Low-voltage car battery protection
-- Tamper or unplug detection
-- Store-and-forward persistence in flash, not only RAM
+- Every release bumps the version in the firmware and lands as **one commit
+  titled `vX.Y.Z — summary`**, tagged `vX.Y.Z`. Commit + push after every
+  change (including experiments) so any unit in the field can be matched to
+  exact source and rolled back.
+- OTA rollout order: bench unit first, then the fleet.

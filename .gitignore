@@ -7,3 +7,14 @@ frontend/node_modules/
 frontend/.netlify/
 frontend/out/
 *.DS_Store
+
+# Personal/other-project files that live in this folder but are not firmware
+*.skp
+*.zip
+fiber_laser_*
+prismatic_powder_layer_notes.html
+rc2_powder_gun_quick_settings.html
+serve_skp_cors.py
+vintage-moto-ct-logo-options/
+vintage-moto-ct-logo-options-clean/
+assets/
