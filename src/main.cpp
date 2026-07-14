@@ -2182,7 +2182,16 @@ class ReAdvertiseCallbacks : public BLEServerCallbacks {
 };
 
 void startBleAdvertising() {
-  BLEDevice::init("123Track");
+  // The device identity rides IN the advertised name ("123T-<id suffix>") so
+  // phones can identify trackers straight from the advertisement. The GATT
+  // devinfo read hangs indefinitely on iOS against bluedroid (works from
+  // macOS) — the app's scan found and connected to boards it then reported as
+  // "no trackers found". Name-based identity needs no connection at all; the
+  // devinfo characteristic stays for richer reads (fw/battery) by tolerant
+  // clients.
+  String suffix = g_deviceId.startsWith("tracker-") ? g_deviceId.substring(8) : g_deviceId;
+  if (suffix.length() == 0) suffix = "unset";
+  BLEDevice::init((String("123T-") + suffix).c_str());
   BLEServer*    server  = BLEDevice::createServer();
   g_bleServer = server;
   server->setCallbacks(new ReAdvertiseCallbacks());
