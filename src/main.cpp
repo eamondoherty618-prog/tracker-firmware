@@ -2417,6 +2417,18 @@ void loop() {
   // driver's phone can identify this vehicle (see updatePresenceAdvertising).
   updatePresenceAdvertising(ignitionOn && lastGpsFix);
 
+  // Unadopted boards must stay claimable: a WiFi scan (no-fix geolocation
+  // fallback) silently kills BLE advertising and nothing re-arms it — bench
+  // board advertised after every boot, went dark within minutes indoors, and
+  // Add Device found nothing. Re-assert every 30s; a no-op while advertising
+  // is already active.
+  static uint32_t lastClaimAdvMs = 0;
+  if (!g_adopted && g_presenceBleInited && millis() - lastClaimAdvMs >= 30000UL) {
+    lastClaimAdvMs = millis();
+    updateBleDevInfo();
+    BLEDevice::startAdvertising();
+  }
+
   // Wake-on-motion: while parked the telemetry interval stretches to a 10-min
   // heartbeat. There's no alternator-voltage signal on this hardware, so poll GPS
   // speed directly every 15s; when the vehicle starts moving, jump straight to live
