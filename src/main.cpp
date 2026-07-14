@@ -2155,14 +2155,25 @@ void updateBleDevInfo() {
 
 bool g_presenceBleInited = false;  // bluedroid stack is up (deinit is unreliable — init once)
 bool g_presenceBleOn = false;
+BLEServer* g_bleServer = nullptr;
+uint16_t g_bleConnId = 0;
+uint32_t g_bleConnectedAtMs = 0;   // 0 = no central connected
 
 // The stack stops advertising the moment a central connects (e.g. the app's
 // presence watcher or claim scan reading devinfo) and does NOT resume it on
 // disconnect — without this callback one background read from any phone made
 // the tracker permanently invisible (bench-found: Add Device saw nothing
 // because the owner's phone had already connected minutes earlier).
+// onConnect stamps the connection so the loop can evict centrals that never
+// leave (a leaked phone connection held a bench tracker hostage for a day —
+// visible only as "Connected: 123Track" in the phone's Bluetooth settings).
 class ReAdvertiseCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer* s) override {
+    g_bleConnId = s->getConnId();
+    g_bleConnectedAtMs = millis();
+  }
   void onDisconnect(BLEServer*) override {
+    g_bleConnectedAtMs = 0;
     if (!g_adopted || g_presenceBleOn) {
       updateBleDevInfo();
       BLEDevice::startAdvertising();
@@ -2173,6 +2184,7 @@ class ReAdvertiseCallbacks : public BLEServerCallbacks {
 void startBleAdvertising() {
   BLEDevice::init("123Track");
   BLEServer*    server  = BLEDevice::createServer();
+  g_bleServer = server;
   server->setCallbacks(new ReAdvertiseCallbacks());
   BLEService*   service = server->createService(FLEET_BLE_SERVICE_UUID);
   g_bleDevInfoChar = service->createCharacteristic(
@@ -2427,6 +2439,16 @@ void loop() {
     lastClaimAdvMs = millis();
     updateBleDevInfo();
     BLEDevice::startAdvertising();
+  }
+
+  // Evict centrals that connect and never leave: while a phone holds the GATT
+  // link the tracker does not advertise AT ALL, so a leaky client silences it
+  // for every scanner (field: a phone's stuck connection hid a bench board
+  // for a day). Devinfo reads take ~2s; 45s means the other end leaked.
+  if (g_bleConnectedAtMs != 0 && g_bleServer && millis() - g_bleConnectedAtMs >= 45000UL) {
+    Serial.println("BLE: dropping stale central connection");
+    g_bleServer->disconnect(g_bleConnId);
+    g_bleConnectedAtMs = 0;
   }
 
   // Wake-on-motion: while parked the telemetry interval stretches to a 10-min
