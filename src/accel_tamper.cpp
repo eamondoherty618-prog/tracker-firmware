@@ -15,6 +15,7 @@ constexpr uint8_t REG_DATAX0 = 0x32;      // 6 bytes X/Y/Z little-endian
 constexpr float G_PER_LSB = 0.049f;
 
 bool g_present = false;
+uint8_t g_addr = TRACKER_ACCEL_ADDR;
 
 struct ImpactEvent { uint32_t atMs; float peakG; };
 constexpr size_t MAX_EVENTS = 5;
@@ -24,17 +25,17 @@ float g_sessionPeakG = 0;
 portMUX_TYPE g_mux = portMUX_INITIALIZER_UNLOCKED;
 
 bool writeReg(uint8_t reg, uint8_t val) {
-  Wire.beginTransmission(TRACKER_ACCEL_ADDR);
+  Wire.beginTransmission(g_addr);
   Wire.write(reg);
   Wire.write(val);
   return Wire.endTransmission() == 0;
 }
 
 bool readRegs(uint8_t reg, uint8_t* buf, size_t n) {
-  Wire.beginTransmission(TRACKER_ACCEL_ADDR);
+  Wire.beginTransmission(g_addr);
   Wire.write(reg);
   if (Wire.endTransmission(false) != 0) return false;
-  if (Wire.requestFrom((int)TRACKER_ACCEL_ADDR, (int)n) != (int)n) return false;
+  if (Wire.requestFrom((int)g_addr, (int)n) != (int)n) return false;
   for (size_t i = 0; i < n; i++) buf[i] = Wire.read();
   return true;
 }
@@ -100,14 +101,45 @@ void samplerTask(void*) {
 }  // namespace
 
 void accelInit() {
+#if TRACKER_BENCH_DEBUG
+  // Line check BEFORE claiming the pins: a wired-up I2C bus idles HIGH
+  // (breakout pull-ups). HIGH/HIGH = wires land here, sensor just mute
+  // (CS strap / dead sensor). LOW or drifting = wire, ground, or wrong pin.
+  pinMode(TRACKER_ACCEL_SDA, INPUT);
+  pinMode(TRACKER_ACCEL_SCL, INPUT);
+  delay(5);
+  Serial.printf("ACCEL: line check SDA(21)=%s SCL(22)=%s\n",
+                digitalRead(TRACKER_ACCEL_SDA) ? "HIGH" : "LOW",
+                digitalRead(TRACKER_ACCEL_SCL) ? "HIGH" : "LOW");
+#endif
+
   Wire.begin(TRACKER_ACCEL_SDA, TRACKER_ACCEL_SCL);
   Wire.setTimeOut(50);
 
+#if TRACKER_BENCH_DEBUG
+  // Bench visibility: who is actually on the bus?
+  Serial.print("ACCEL: I2C scan:");
+  for (uint8_t a = 0x08; a < 0x78; a++) {
+    Wire.beginTransmission(a);
+    if (Wire.endTransmission() == 0) Serial.printf(" 0x%02x", a);
+  }
+  Serial.println();
+#endif
+
+  // The ADXL375's ALT ADDRESS pin selects 0x53 (low) or 0x1D (high) — breakout
+  // boards differ, so probe both rather than dictating the strap.
   uint8_t devid = 0;
-  if (!readRegs(REG_DEVID, &devid, 1) || devid != 0xE5) {
+  g_addr = TRACKER_ACCEL_ADDR;
+  bool found = readRegs(REG_DEVID, &devid, 1) && devid == 0xE5;
+  if (!found) {
+    g_addr = 0x1D;
+    found = readRegs(REG_DEVID, &devid, 1) && devid == 0xE5;
+  }
+  if (!found) {
     Serial.println("ACCEL: ADXL375 not present — continuing without impact detection");
     return;
   }
+  Serial.printf("ACCEL: ADXL375 at 0x%02x\n", g_addr);
   if (!writeReg(REG_BW_RATE, 0x0A) || !writeReg(REG_POWER_CTL, 0x08)) {
     Serial.println("ACCEL: ADXL375 found but config failed — disabled");
     return;

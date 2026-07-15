@@ -13,6 +13,7 @@ namespace {
 
 enum class BusState : uint8_t {
   UNINSTALLED,   // driver not installed (boot, or torn down after failed probe)
+  LISTENING,     // passive (LISTEN_ONLY): confirm healthy 500k traffic first
   PROBING,       // sending detection requests, waiting for any ECU to answer
   READY,         // bus confirmed — normal polling
   ABSENT,        // probe failed — dormant until the next re-probe window
@@ -240,9 +241,15 @@ void handleFrame(const twai_message_t& msg) {
   }
 }
 
-bool installDriver() {
+bool installDriver(bool listenOnly) {
+  // LISTEN_ONLY is physically passive: no TX, not even ACK bits. The probe
+  // starts there so a mis-wired tap or wrong-bitrate bus can't be disturbed
+  // by us — a live vehicle bus carries power steering and worse (field:
+  // plugging an unpowered, terminated tap bumped the idle and latched a
+  // "service power steering" warning).
   twai_general_config_t g = TWAI_GENERAL_CONFIG_DEFAULT(
-      (gpio_num_t)TRACKER_CAN_TX_GPIO, (gpio_num_t)TRACKER_CAN_RX_GPIO, TWAI_MODE_NORMAL);
+      (gpio_num_t)TRACKER_CAN_TX_GPIO, (gpio_num_t)TRACKER_CAN_RX_GPIO,
+      listenOnly ? TWAI_MODE_LISTEN_ONLY : TWAI_MODE_NORMAL);
   g.rx_queue_len = 16;
   g.tx_queue_len = 4;
   twai_timing_config_t t = TWAI_TIMING_CONFIG_500KBITS();
@@ -265,11 +272,18 @@ void goAbsent() {
   Serial.println("OBD2: no bus detected — dormant (will re-probe when the vehicle is active)");
 }
 
+uint32_t g_listenStartMs = 0;
+uint32_t g_listenFrames = 0;
+
 void startProbe() {
+  // Phase 1: passive listen. Healthy 500k traffic (frames received, no bus
+  // errors) is required before we ever transmit a bit.
   if (g_state == BusState::UNINSTALLED || g_state == BusState::ABSENT) {
-    if (!installDriver()) { g_state = BusState::ABSENT; g_nextProbeMs = millis() + TRACKER_OBD_REPROBE_MS; return; }
+    if (!installDriver(true)) { g_state = BusState::ABSENT; g_nextProbeMs = millis() + TRACKER_OBD_REPROBE_MS; return; }
   }
-  g_state = BusState::PROBING;
+  g_state = BusState::LISTENING;
+  g_listenStartMs = millis();
+  g_listenFrames = 0;
   g_probeAttempts = 0;
   g_extended = false;
   g_op = Op::NONE;
@@ -316,6 +330,31 @@ void canObd2Service(bool vehicleActive) {
       return;
     case BusState::UNINSTALLED:
       return;
+    case BusState::LISTENING: {
+      // Count anything heard; healthy traffic ⇒ safe to speak. Silence for
+      // the whole window ⇒ treat as absent (or parked) and stay passive.
+      twai_message_t msg;
+      while (twai_receive(&msg, 0) == ESP_OK) {
+        g_listenFrames++;
+#if TRACKER_BENCH_DEBUG
+        if (g_listenFrames <= 5) {
+          Serial.printf("CAN LISTEN %08lx dlc=%d\n", (unsigned long)msg.identifier, msg.data_length_code);
+        }
+#endif
+      }
+      if (g_listenFrames >= 20) {
+        // Real traffic at 500k confirmed — switch to normal mode and probe.
+        teardownDriver();
+        if (!installDriver(false)) { g_state = BusState::ABSENT; g_nextProbeMs = now + TRACKER_OBD_REPROBE_MS; return; }
+        Serial.println("OBD2: bus traffic heard — probing");
+        g_state = BusState::PROBING;
+        g_probeAttempts = 0;
+        g_extended = false;
+      } else if (now - g_listenStartMs > 5000) {
+        goAbsent();
+      }
+      return;
+    }
     case BusState::PROBING: {
       if (g_op == Op::PROBE && (int32_t)(now - g_opDeadlineMs) < 0) return;  // await answer
       if (g_op == Op::PROBE) {                       // timed out
