@@ -23,7 +23,7 @@
 #ifndef TRACKER_API_KEY
 #define TRACKER_API_KEY "c5cc56a23546eb487223fe810ae8a8b76d83376ee09140f7"
 #endif
-#define TRACKER_FIRMWARE_VERSION "0.10.9"
+#define TRACKER_FIRMWARE_VERSION "0.11.0"
 
 // VESTIGIAL: alternator-voltage ignition detection. This hardware uses a 12V→5V buck
 // with no voltage sense, and AT+CBC only reads the buffer LiPo (~3.8V), so these can
@@ -93,3 +93,31 @@
 #define TRACKER_GNSS_WARMUP_MS 45000UL
 #define TRACKER_GNSS_STATUS_LOG_MS 30000UL
 #define TRACKER_GNSS_RECYCLE_MS 1800000UL
+
+// ── Optional add-on hardware (runtime-detected; absent = module dormant) ─────
+// CAN/OBD2 via M5Stack Mini CAN (TJA1051T) on the ESP32 TWAI controller.
+// Pins 32/33 are free on the T-SIM7000G (modem UART 26/27, SD 2/13/14/15).
+#define TRACKER_CAN_TX_GPIO 32
+#define TRACKER_CAN_RX_GPIO 33
+// Mode 01 PIDs polled round-robin while the vehicle is active. Decoders exist
+// for 0x0C rpm / 0x0D speed / 0x05 coolant / 0x11 throttle; other PIDs report
+// their raw first byte as pid_XX.
+#define TRACKER_OBD_PIDS { 0x0C, 0x0D, 0x05, 0x11 }
+#define TRACKER_OBD_POLL_MS 5000UL       // full PID rotation period
+#define TRACKER_OBD_DTC_POLL_MS 60000UL  // stored/pending DTCs alternate here
+#define TRACKER_OBD_REPROBE_MS 300000UL  // absent bus: retry while driving
+
+// ADXL375 high-g accelerometer (impact/tamper). INT1 wired to GPIO 34 for
+// future wake-from-deep-sleep (v1 leaves it unused).
+#define TRACKER_ACCEL_SDA 21
+#define TRACKER_ACCEL_SCL 22
+#define TRACKER_ACCEL_ADDR 0x53
+#define TRACKER_ACCEL_INT1_GPIO 34
+#define TRACKER_IMPACT_THRESHOLD_G 6.0f  // dynamic g (gravity removed) that counts as an impact
+#define TRACKER_IMPACT_DEBOUNCE_MS 2000UL
+
+// Bench verification: 1 = dump raw CAN frames + live accel readings to serial.
+// Build with the bench_debug pio env rather than editing this.
+#ifndef TRACKER_BENCH_DEBUG
+#define TRACKER_BENCH_DEBUG 0
+#endif

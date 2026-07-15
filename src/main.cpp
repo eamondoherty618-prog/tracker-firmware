@@ -13,6 +13,8 @@
 #include <WiFi.h>
 
 #include "tracker_config.h"
+#include "can_obd2.h"
+#include "accel_tamper.h"
 
 // Fleet tracker GATT service — advertised continuously so the mobile app can
 // discover and claim this tracker via Bluetooth without typing a device ID.
@@ -1289,6 +1291,12 @@ void handleTelemetryResponse(const String& respBodyIn) {
     updateAdoptionFromServer(respDoc["adopted"].as<bool>());
   }
 
+  // Server-commanded OBD2 Mode 04 (clear stored DTCs). This response flag is
+  // the ONLY trigger — no local path can clear codes.
+  if (respDoc["clear_dtc"] == true) {
+    canObd2RequestClearDtc();
+  }
+
   const char* otaVer = respDoc["ota"]["version"] | "";
   const int otaSize = respDoc["ota"]["size"] | 0;
   const char* otaMd5 = respDoc["ota"]["md5"] | "";
@@ -1864,6 +1872,12 @@ String buildTelemetry(bool compact = false) {
     ci["cid"] = cellInfo.cid;
   }
 
+  // Optional add-on sections — appended last so existing fields are untouched.
+  // Compact (UDP, 508-byte budget): live OBD values + recent impact peak only.
+  // Full (HTTPS): presence flags, VIN, DTC lists, impact event log.
+  canObd2AppendTelemetry(doc, compact);
+  accelAppendTelemetry(doc, compact);
+
   String body;
   serializeJson(doc, body);
   return body;
@@ -2364,6 +2378,11 @@ void setup() {
   Serial.println(modem.getModemInfo());
   configureNetworkMode();
 
+  // Optional add-on hardware — both probe at runtime and go dormant when the
+  // module isn't wired, so one firmware runs every hardware combination.
+  accelInit();     // ADXL375 on I2C 21/22; starts its own 100 Hz sampling task
+  canObd2Init();   // Mini CAN on TWAI 32/33; presence proven by an answered OBD2 request
+
   logSimDiagnostics();
   connectGprs();
   // Power the GNSS receiver BEFORE pulling A-GPS, so AT+CAGPS injects EPO
@@ -2437,6 +2456,11 @@ void loop() {
   // Driver-presence: advertise over BLE while on a trip with a GPS fix so the
   // driver's phone can identify this vehicle (see updatePresenceAdvertising).
   updatePresenceAdvertising(ignitionOn && lastGpsFix);
+
+  // Optional add-ons: cooperative CAN state machine (never blocks — one
+  // request in flight, drained by polling). The accelerometer runs in its own
+  // task and needs no loop service.
+  canObd2Service(ignitionOn);
 
   // Unadopted boards must stay claimable: a WiFi scan (no-fix geolocation
   // fallback) silently kills BLE advertising and nothing re-arms it — bench
