@@ -31,6 +31,10 @@ Per board:
 
 No SIM yet? Fine — flash anyway; identity comes from the chip, not the SIM.
 
+After flashing, **unplug and replug the board once** (power-cycle): the first
+boot straight out of the flasher occasionally wedges the BLE radio; a clean
+power-up always advertises, and the 30s keep-alive holds it visible.
+
 ## 2. Vehicle: install
 
 - Wire the 12V→5V buck to switched or constant 12V, board in its case, GPS
@@ -80,3 +84,50 @@ next heartbeat and can be force-updated from the Devices page.
 - [ ] SIMs inserted; 1NCE portal: all SIMs enabled, sessions reset if stale
 - [ ] `fleet_inventory.csv` committed after the batch
 - [ ] Install + adopt per vehicle; live map check per vehicle
+
+## Add-on hardware: CAN/OBD2 tap + impact sensor (fw ≥ v0.11.x)
+
+Optional per-vehicle extras — the same firmware detects them at runtime, and a
+tracker without them behaves exactly as before.
+
+### Wiring
+
+| Module | Connection |
+|---|---|
+| M5Stack Mini CAN (TJA1051T) | Grove → ESP32 GPIO 32 (TX) / 33 (RX); CANH/CANL → OBD2 pins 6/14 |
+| ADXL375 accelerometer | VS **and** CS → 3.3V, GND + SDO → GND, SDA → 21, SCL → 22, INT1 → 34 (reserved) |
+
+### ⚠️ Vehicle-safety checklist — read before tapping an OBD2 port
+
+Hard-won (first attempt bumped a truck's idle and latched power-steering /
+StabiliTrak warnings):
+
+1. **Remove the 120Ω terminator from the CAN module.** Hobby transceiver
+   boards ship terminated; a vehicle bus already has its two terminators, and
+   a third passively drags the whole network down — powered or not. Look for a
+   TERM switch/jumper, else desolder the SMD resistor marked `121`. Verify
+   with a meter: CANH↔CANL at the module must read OPEN.
+2. **Verify the OBD2 pins with the mirroring trap in mind.** Numbering is
+   defined looking INTO the vehicle's socket (1–8 top, 9–16 bottom). A male
+   plug wired while viewed from the back is left-right mirrored — "6/14"
+   counted wrong lands on 3/11, and on GM trucks pin 1 is single-wire GMLAN
+   (chassis modules — instant StabiliTrak complaints). Meter checks at the
+   plug: 6↔14 open, each to ground (4/5) open, each to battery (16) open.
+3. **Power the tracker before plugging into the OBD port**, and plug in with
+   the **ignition OFF** (GM stability systems dislike hot-plug transients).
+4. Keep the OBD-to-module wire short (under ~30 cm).
+5. Staged test: ignition ON engine OFF → dash quiet 30s → engine on → quiet →
+   done. Any warning: unplug (effects are transient), reassess.
+
+The firmware's own guard: the CAN probe starts in TWAI listen-only mode
+(physically cannot transmit, not even ACK bits) and only speaks after hearing
+20+ healthy frames at 500k — so a silent, wrong-bitrate, or mis-wired bus is
+never disturbed by us.
+
+### Bench verification
+
+Flash the `bench_debug` env — it prints an I2C scan + line check for the
+accelerometer at boot, live g readings, raw CAN frames, and every probe state
+change. The server payload gains optional `obd` and `impact` sections
+(presence flags on HTTPS posts, live values on UDP), and stored DTCs can be
+cleared remotely via `POST /api/fleet/obd/clear-dtc` (owner/admin only).

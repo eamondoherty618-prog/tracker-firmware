@@ -2,7 +2,7 @@
 
 Production firmware for the in-vehicle GPS trackers behind
 [123 Mobile Track](https://github.com/eamondoherty618-prog/123-mobile-track).
-Current release: **v0.10.5** (see tags; `v0.9.48-known-good` is the fallback
+Current release: **v0.11.1** (see tags; `v0.9.48-known-good` is the fallback
 baseline).
 
 **Setting up new trackers?** See [DEPLOYMENT.md](DEPLOYMENT.md) — one generic
@@ -23,22 +23,35 @@ the app, and SD-card re-flash in the field.
   is impossible on this hardware. The LiPo also buffers the SIM7000G's ~2A
   bursts — a healthy battery matters; brownout is the prime reset suspect.
 - **WiFi-scan geolocation fallback** when GNSS has no fix (async, un-hangable).
-- **BLE presence advertising** while driving with a fix (v0.10.4) — the driver's
-  phone hears it and the app raises a driver-in-vehicle alert. Deliberately not
-  advertised without a fix, so the WiFi-scan fallback keeps working.
+- **BLE identity + presence** (v0.10.9): the advertised name IS the identity
+  (`123T-<id>`), so the app identifies trackers straight from the airwaves —
+  no GATT connection (an iOS read-hang burned days before this design).
+  Unadopted boards advertise continuously for in-app claiming with a 30s
+  keep-alive (WiFi scans silently kill advertising) and evict any phone that
+  holds a connection >45s (a leaked connection makes a tracker invisible).
+  Adopted boards advertise only while driving with a fix — that powers the
+  driver-in-vehicle alert — so the WiFi-scan fallback keeps working.
 - **OTA updates** from the web app: chunked download, MD5 integrity,
   force-update support.
 - **Self-healing diagnostics**: hardware watchdog, hang breadcrumbs
   (`last_hang_op` survives reset and is reported in telemetry), reset-reason
   reporting, bounded network waits. This is how the mid-drive freeze was
   cracked (v0.9.28–0.9.32).
+- **Optional add-on hardware** (v0.11.x — runtime-detected, one firmware runs
+  every combination): **CAN/OBD2** via TWAI on 32/33 (live RPM/speed/coolant/
+  throttle, stored+pending DTCs, VIN via ISO-TP, server-commanded DTC clear;
+  probes listen-only first so a live vehicle bus can never be disturbed) and
+  an **ADXL375 high-g accelerometer** on I2C 21/22 (100 Hz impact/tamper
+  detection in its own task). See DEPLOYMENT.md for the vehicle-safety
+  checklist before tapping an OBD2 port.
 
 ## Layout
 
 | Path | What it is |
 |---|---|
 | `src/`, `include/` | The firmware. Config in `include/tracker_config.h`. |
-| `platformio.ini` | Build config (PlatformIO, ESP32). `factory` env = the generic new-board image. |
+| `platformio.ini` | Build config (PlatformIO, ESP32). `factory` env = the generic new-board image; `bench_debug` adds raw CAN + accel serial dumps. |
+| `src/can_obd2.*`, `src/accel_tamper.*` | Optional add-on hardware modules (headers in `include/`) — runtime-detected, dormant when absent. |
 | `flash_new_tracker.sh` | Bench-flash a new board, print its identity, log to `fleet_inventory.csv`. |
 | `make_sd_card.sh` | Write a microSD recovery/update card (field re-flash, no laptop). |
 | `deploy_firmware.sh`, `package_firmware.sh` | Build + publish a release to the app's OTA store. |
