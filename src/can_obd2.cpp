@@ -342,6 +342,12 @@ void canObd2Service(bool vehicleActive) {
         }
 #endif
       }
+      if (TRACKER_CAN_LISTEN_ONLY_LOCK) {
+        // Locked passive: report what we hear, never speak. Frame count goes
+        // out in telemetry so the first vehicle session is verifiable without
+        // a laptop.
+        return;
+      }
       if (g_listenFrames >= 20) {
         // Real traffic at 500k confirmed — switch to normal mode and probe.
         teardownDriver();
@@ -433,6 +439,9 @@ void canObd2AppendTelemetry(JsonDocument& doc, bool compact) {
 
   JsonObject obd = doc["obd"].to<JsonObject>();
   obd["present"] = present;
+  if (g_state == BusState::LISTENING && g_listenFrames > 0) {
+    obd["listen_frames"] = g_listenFrames;  // passive session: bus heard, not spoken to
+  }
   if (!present) return;
   obd["addr"] = g_extended ? "29bit" : "11bit";
   for (size_t i = 0; i < kPidCount; i++) {

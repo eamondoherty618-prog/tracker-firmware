@@ -121,3 +121,10 @@
 #ifndef TRACKER_BENCH_DEBUG
 #define TRACKER_BENCH_DEBUG 0
 #endif
+// First-live-vehicle guard: 1 = CAN stays in LISTEN_ONLY permanently — hears
+// and reports traffic but can never transmit (not even ACK bits). Use the
+// bench_listen env for the first session on a real vehicle; switch to the
+// normal build only after clean traffic is confirmed.
+#ifndef TRACKER_CAN_LISTEN_ONLY_LOCK
+#define TRACKER_CAN_LISTEN_ONLY_LOCK 0
+#endif
