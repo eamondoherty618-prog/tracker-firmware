@@ -1,0 +1,23 @@
+name: Notify owners of firmware changes
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      # Same AI-summarized update note the app repo sends (push + SMS via
+      # deploy-notify, and it lands on the in-app What's New page). Firmware
+      # releases matter to the owners as much as app releases do.
+      - name: Notify owners
+        run: |
+          COMMITS=$(jq -c '[.commits[].message | split("\n")[0] | "firmware: " + .] | .[0:20]' "$GITHUB_EVENT_PATH")
+          if [ "$COMMITS" = "null" ] || [ "$COMMITS" = "[]" ]; then
+            echo "no commits in event payload — skipping"; exit 0
+          fi
+          curl -s -X POST "https://123mobiletrack.com/api/fleet/deploy-notify" \
+            -H "content-type: application/json" \
+            -H "x-tracker-key: c5cc56a23546eb487223fe810ae8a8b76d83376ee09140f7" \
+            -d "{\"commits\": $COMMITS}" | head -c 300 || true
