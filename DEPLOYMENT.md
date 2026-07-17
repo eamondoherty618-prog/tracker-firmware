@@ -90,12 +90,52 @@ next heartbeat and can be force-updated from the Devices page.
 Optional per-vehicle extras — the same firmware detects them at runtime, and a
 tracker without them behaves exactly as before.
 
-### Wiring
+### Wiring (as-built, bench-verified 2026-07)
 
-| Module | Connection |
+**Mini CAN (U179, TJA1051T) — screw terminals ← OBD2 pass-through cable:**
+
+| Terminal | OBD2 pin | Cable wire color |
+|---|---|---|
+| H | 6 (CAN-H) | solid red |
+| L | 14 (CAN-L) | yellow |
+| G | 4 (chassis ground) | green |
+| HV | **EMPTY — never wire pin 16 here** | orange-white stays taped |
+
+Cable bundle traps: solid orange = pin 3 and red-white = pin 15 — never
+confuse them with the pin 6 / pin 16 wires.
+
+**Mini CAN Grove leads → LilyGo:**
+
+| Grove lead | LilyGo |
 |---|---|
-| M5Stack Mini CAN (TJA1051T) | Grove → ESP32 GPIO 32 (TX) / 33 (RX); CANH/CANL → OBD2 pins 6/14 |
-| ADXL375 accelerometer | VS **and** CS → 3.3V, GND + SDO → GND, SDA → 21, SCL → 22, INT1 → 34 (reserved) |
+| yellow (CAN TX) | GPIO 32 |
+| white (CAN RX) | GPIO 33 |
+| black (GND) | GND |
+| red (5V) | **VIN 5V pin** — the unit powers FROM the tracker |
+
+⚠️ **The unit must never be powered from OBD2 pin 16.** A transceiver that
+wakes up while the ESP32 driving its TXD is dead gets TXD dragged low
+through the dead chip's clamp diodes and **jams the bus dominant** the
+instant the connector seats — this caused three rounds of instant
+StabiliTrak / power-steering dash warnings before being traced. Powering
+from the tracker's rail makes the failure state physically impossible.
+The unit's 120Ω terminator (SMD marked `121`) is removed — see checklist.
+
+**ADXL375 accelerometer → LilyGo (3.3V ONLY — no 5V tolerance):**
+
+| Breakout pin | Connect to |
+|---|---|
+| VS + VCC (tied) | 3V3 |
+| GND + SDO (tied) | GND |
+| CS | 3V3 (firm joint — floating/cold = SPI mode = mute on I2C) |
+| SDA | GPIO 21 |
+| SCL | GPIO 22 |
+| INT1 / INT2 | unconnected (INT1 reserved for GPIO 34 wake) |
+
+⚠️ **This generic breakout's SDA/SCL silkscreen is unreliable** — as built,
+the working wiring is *swapped relative to the labels*. Verify with the
+bench_debug build's boot output: `I2C scan: 0x53` = correct; an empty scan
+with both lines reading HIGH = swap the two data wires at the LilyGo.
 
 ### ⚠️ Vehicle-safety checklist — read before tapping an OBD2 port
 
@@ -113,10 +153,17 @@ StabiliTrak warnings):
    counted wrong lands on 3/11, and on GM trucks pin 1 is single-wire GMLAN
    (chassis modules — instant StabiliTrak complaints). Meter checks at the
    plug: 6↔14 open, each to ground (4/5) open, each to battery (16) open.
-3. **Power the tracker before plugging into the OBD port**, and plug in with
+3. **Power the CAN unit from the tracker's rail (Grove red → VIN 5V), never
+   from OBD pin 16** — see the wiring section for the failure mode.
+4. **Power the tracker before plugging into the OBD port**, and plug in with
    the **ignition OFF** (GM stability systems dislike hot-plug transients).
-4. Keep the OBD-to-module wire short (under ~30 cm).
-5. Staged test: ignition ON engine OFF → dash quiet 30s → engine on → quiet →
+5. Keep the OBD-to-module wire short (under ~30 cm).
+6. Meter pre-flight at the male plug: continuity 6→H / 14→L / 4→G, then
+   6↔14, CAN↔ground, CAN↔pin-16 all OPEN.
+7. First live session: flash the `bench_listen` env (CAN locked passive —
+   cannot transmit); confirm `listen_frames` climbing in telemetry with a
+   calm dash BEFORE flashing the normal build.
+8. Staged test: ignition ON engine OFF → dash quiet 30s → engine on → quiet →
    done. Any warning: unplug (effects are transient), reassess.
 
 The firmware's own guard: the CAN probe starts in TWAI listen-only mode
