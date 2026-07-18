@@ -1,0 +1,23 @@
+Net,Connections,Notes
+VIN_OBD,"J1.1, F1.1",Raw OBD pin 16 input before fuse.
+VIN_FUSED,"F1.2, D2.1, D1.1",Fused transient node.
+VIN_PROT,"D1.2, U2.VIN, C1.1, C2.1, R1.1, R7.1",Reverse-protected 12V rail feeding buck and ADC divider.
++5V,"U2 output, L1.2, C3.1, C4.1, J3A.1, U3.VCC",5V rail for LilyGo VIN and CAN transceiver.
++3V3,"J3A.3, U3.VIO, U4.VS/VDDIO, R11.2, R12.2, C9.1, C10.1",Use LilyGo 3.3V regulator in Option A.
+GND,"J1.2, J2.2, J3A.2, J3B.2/3, U2 EP/GND, U3.GND, U4.GND, shields/returns",Common ground.
+VBAT,"J2.1, BT1.1, J3B.1, R3.1",Battery positive routed to LilyGo charge/battery pins.
+CANH_OBD,"J1.3, D4.1, L2.1",Vehicle CAN-H before optional choke.
+CANL_OBD,"J1.4, D4.2, L2.2",Vehicle CAN-L before optional choke.
+CANH,"L2.3, U3.CANH, JP1/R10",CAN-H after optional choke.
+CANL,"L2.4, U3.CANL, JP1/R10",CAN-L after optional choke.
+CAN_TX_GPIO32,"J3A.6, U3.TXD",ESP32 TWAI TX.
+CAN_RX_GPIO33,"J3A.7, U3.RXD",ESP32 TWAI RX.
+I2C_SDA_GPIO21,"J3A.4, U4.SDA, R11.1",ADXL375 SDA.
+I2C_SCL_GPIO22,"J3A.5, U4.SCL, R12.1",ADXL375 SCL.
+ACCEL_INT1_GPIO34,"J3A.8, U4.INT1, R13.1",Wake-on-impact interrupt.
+VEH_SENSE_GPIO35,"J3A.9, R1.2, R2.1, C11.1","Vehicle voltage ADC, 100k/20k divider."
+VBAT_SENSE_GPIO36,"J3A.10, R3.2, R4.1, C12.1","Battery ADC, 1M/1M divider."
+STATUS_LED_GPIO23,"J3A.11, R15.1",Optional status LED drive.
+LED_A,"R15.2, D5.1",Status LED anode node.
+CAN_TERM_H,"JP1.2, R10.1",Optional termination node; open unless JP1 is bridged and R10 is populated.
+GPIO26/GPIO27/GPIO2/GPIO13/GPIO14/GPIO15,not connected,Reserved for LilyGo modem UART and SD card per request.

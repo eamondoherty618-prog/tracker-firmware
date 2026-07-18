@@ -3,6 +3,9 @@
 This page is the quick reference for the tracker hardware that actually lives
 in this repo.
 
+The KiCad carrier-board source is in `hardware/obd_tracker_carrier_v1/`.
+Generated zip packages and KiCad lock/session files stay out of Git.
+
 ## Core board
 
 The main board is a `LilyGo T-SIM7000G`.
@@ -66,4 +69,3 @@ Important:
 | Tracker is parked | Heartbeat slows down to save data and power. |
 | OBD2 is present | Firmware polls RPM, speed, coolant, throttle, VIN, and DTCs. |
 | Impact sensor is present | Firmware records high-g events and reports peaks. |
-

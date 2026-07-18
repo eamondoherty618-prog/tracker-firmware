@@ -20,6 +20,7 @@ Current firmware: `v0.11.1`
 | `make_sd_card.sh` | Build a field-recovery microSD card. |
 | `deploy_firmware.sh` | Build and publish an OTA firmware release. |
 | `fleet_inventory.csv` | Flash log for boards that have been provisioned. |
+| `hardware/obd_tracker_carrier_v1/` | KiCad carrier-board files, BOM, placement file, and mechanical references. |
 | `docs/` | Plain-English wiring and system overview. |
 
 ## Quick build and flash
@@ -41,3 +42,9 @@ pio run -t upload
    their next check-in.
 
 If you need the wiring details or the install order, use the two docs above.
+
+## Repo hygiene
+
+Tracked files should be firmware, deployment scripts, docs, and hardware source
+files. Generated outputs, local KiCad session files, zip packages, telemetry
+logs, PlatformIO builds, and unrelated shop/design files are ignored.

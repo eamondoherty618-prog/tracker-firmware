@@ -1,0 +1,30 @@
+Reference,Description,Manufacturer_Part,LCSC_JLCPCB,Qty,Notes
+J1,"OBD2 harness connector, 4 pos locking or screw terminal",Molex Micro-Fit 3.0 43045-0400 preferred; KF128-2.54-4P alt,KF128 alt C474922; Micro-Fit verify/consign,1,"Populate one connector style. Pin order: 12V, GND, CANH, CANL."
+F1,"Resettable fuse, 1812, 30V, hold 2.0A",LUTE 1812L200/30GRT,C49326271,1,Place before TVS so reverse/transient faults are current-limited.
+D1,"Reverse-polarity series Schottky, 5A, 60V",GOODWORK SS56 or equivalent,C2848693,1,Schottky v1 for simplicity. PFET ideal-diode option can replace after thermal testing.
+D2,"Automotive input TVS, 600W, 33V standoff",Jingdao SMBJ33A or automotive-qualified equivalent,C353366,1,Choose working voltage above jump-start/normal operation and below buck abs-max clamp margin.
+U2,"60V buck regulator, 3.5A switch, SO-PowerPAD-8",TI TPS54360DDAR,C44377,1,Chosen over 28V bucks for load-dump headroom.
+L1,"Shielded power inductor, 15uH, >=4A, low DCR",Bourns SRN6045/7447719150-class,verify footprint,1,Final value should be checked against TPS54360 Webench/datasheet equations.
+D3,"Buck catch Schottky, 5A, 60V",GOODWORK SS56 or equivalent,C2848693,1,Required because TPS54360 is asynchronous.
+"C1,C2","Input ceramic capacitor, 10uF, 50V, X7R",0805/1206 automotive grade preferred,JLC generic,2,Use two in parallel near VIN/GND of buck.
+"C3,C4","Output capacitor, 47uF, 10V, X7R/polymer",1206 ceramic or polymer low ESR,JLC generic,2,Size output ripple for SIM7000G TX bursts.
+"C5,C6,C7,C8,C9,C10,C11,C12",Decoupling/filter capacitors,0603/0805 X7R,JLC generic,8,Values are labelled in PCB footprints and BOM notes.
+R1,"Vehicle ADC top resistor, 100k 1%",0603,JLC generic,1,With R2 scales 18V to about 3.0V.
+R2,"Vehicle ADC bottom resistor, 20.0k 1%",0603,JLC generic,1,RC filter cap to ground at ADC node.
+"R3,R4","Battery ADC divider, 1.0M 1%",0603,JLC generic,2,4.2V battery reads about 2.1V at GPIO36.
+R5,"Buck feedback top, 52.3k 1%",0603,JLC generic,1,5.0V target with TPS54360 0.8V reference.
+R6,"Buck feedback bottom, 10.0k 1%",0603,JLC generic,1,Feedback divider bottom.
+R7,"Buck EN top, 200k 1%",0603,JLC generic,1,Approx 6V UVLO threshold with R8.
+R8,"Buck EN bottom, 49.9k 1%",0603,JLC generic,1,Approx 6V UVLO threshold with R7.
+R9,"Buck RT resistor, 200k",0603,JLC generic,1,Check final switching frequency/noise tradeoff during regulator validation.
+U3,5V high-speed CAN transceiver with 3.3V IO,NXP TJA1051T/3/1J or MCP2562FD VIO variant,C38695,1,"TXD GPIO32, RXD GPIO33. S/STB tied normal mode."
+D4,CAN bus ESD protector,"Nexperia PESD1CAN,215",C15771,1,Place between connector and choke/transceiver.
+L2,"CAN common-mode choke, optional",ACT45B/51MC-class,DNP or verify,0/1,DNP by default or replace with 0R links for v1 testing.
+"R10,JP1",Optional CAN termination,120R 0603 plus solder jumper,JLC generic,DNP,Do not populate for vehicle bus tapping.
+U4,"High-g accelerometer, LGA-14",Analog Devices ADXL375BCCZ-RL7,C481898,1,Placed near H2 for good impact coupling.
+"R11,R12","I2C pull-ups, 4.7k",0603,JLC generic,2,Pull to LilyGo 3.3V rail.
+R13,"INT1 pulldown, 100k",0603,JLC generic,1,GPIO34 has no internal pull resistor.
+"D5,R15",Status LED and 1k series resistor,0603/0805 LED,JLC generic,1 set,"GPIO23 active high, optional."
+J2,"LiPo battery connector, JST-PH 2.0 2-pin",JST S2B-PH-SM4-TB(LF)(SN) or B2B-PH-K-S,C295747 SMT or C131337 THT,1,Populate for slim pouch build; route to LilyGo battery/charger pins.
+BT1,Single 18650 holder footprint,Keystone 1042/1043-class or slim 1S holder,"usually hand-assembly, verify",DNP/1,Bottom-side alternate. Not for the lowest-height build.
+"J3A,J3B",T-SIM7000G low-profile header/solder rail,2.54mm low-profile receptacle or direct solder pads,JLC generic/hand assembly,2,Exact LilyGo board revision and header positions must be measured before fab.

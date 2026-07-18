@@ -23,6 +23,7 @@ flowchart LR
 | Piece | Where it lives | What it does |
 |---|---|---|
 | Firmware | `src/`, `include/`, `platformio.ini` | Runs on the tracker, reads sensors, talks to the modem, and posts telemetry. |
+| Hardware carrier | `hardware/obd_tracker_carrier_v1/` | KiCad carrier-board design, BOM, placement file, and mechanical references. |
 | App / dashboard | Separate app repo + `123mobiletrack.com` | Shows the map, vehicles, drivers, alerts, and device pages. |
 | Telemetry backend | `123mobiletrack.com/api/fleet/*` | Receives tracker posts, serves OTA metadata, and drives device state. |
 | OTA release store | Netlify Blobs via `deploy_firmware.sh` | Holds the current `.bin` plus version metadata. |
@@ -41,7 +42,7 @@ flowchart LR
 ## What this repo is for
 
 - Building and flashing the tracker firmware.
+- Keeping the carrier-board source and manufacturing references together.
 - Publishing OTA releases.
 - Re-flashing trackers in the field with microSD recovery cards.
 - Documenting the tracker wiring and install process.
-

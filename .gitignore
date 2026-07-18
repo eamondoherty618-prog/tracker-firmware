@@ -8,6 +8,11 @@ compile_commands.json
 .next/
 data/*.jsonl
 
+# KiCad local/session artifacts
+*.kicad_prl
+*.lck
+*-backups/
+
 # Personal/other-project files that share this folder but aren't firmware
 *.skp
 *.zip

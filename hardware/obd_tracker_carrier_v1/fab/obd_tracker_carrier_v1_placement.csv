@@ -1,0 +1,15 @@
+Reference,X_mm,Y_mm,Side,Notes
+J1,7,20,Top,OBD harness entry side
+J2,10,32.5,Top,"JST-PH LiPo, DNP if 18650 build"
+BT1,46,20,Bottom,"18650 holder envelope, DNP in slim build"
+J3A,19.2,7.3,Top,"T-SIM left/header rail, exact rev verify"
+J3B,82.8,7.3,Top,"T-SIM right/header rail, exact rev verify"
+U2,38.5,7.7,Bottom,Buck regulator
+U3,60.5,33,Bottom,CAN transceiver
+U4,75.5,8,Bottom,"ADXL375, near H2 rigid corner"
+L2,22.5,25,Bottom,Optional CAN common-mode choke
+D2,15.5,14.3,Bottom,Input TVS near connector
+H1,4,4,Mechanical,M2.5 2.7mm drill
+H2,84,4,Mechanical,M2.5 2.7mm drill
+H3,84,36,Mechanical,M2.5 2.7mm drill
+H4,4,36,Mechanical,M2.5 2.7mm drill
