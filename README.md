@@ -55,7 +55,7 @@ the app, and SD-card re-flash in the field.
 | `flash_new_tracker.sh` | Bench-flash a new board, print its identity, log to `fleet_inventory.csv`. |
 | `make_sd_card.sh` | Write a microSD recovery/update card (field re-flash, no laptop). |
 | `deploy_firmware.sh`, `package_firmware.sh` | Build + publish a release to the app's OTA store. |
-| `frontend/`, `server/`, `deploy/`, `tools/` | **Legacy bench prototype** — the production app lives in the `123-mobile-track` repo. Kept for reference. |
+| `fleet_inventory.csv` | Log of every flashed board (date, MAC, assigned ID). |
 
 ## Build, flash, release
 
@@ -65,9 +65,11 @@ pio run -t upload          # flash over USB
 ./deploy_firmware.sh       # package + publish as an OTA release
 ```
 
-Note: the OTA publish writes to Netlify Blobs and must run against the
-Netlify-linked `frontend/` directory of the **app repo**, not the legacy
-`frontend/` here — the script handles this, don't bypass it.
+Note: the OTA publish writes to Netlify Blobs, so `deploy_firmware.sh` runs the
+upload from the Netlify-linked frontend of the **app repo**
+(`~/123-mobile-track/frontend`) — it handles that itself; just run it from here.
+This repo is firmware only; the web app and serverless functions live in the
+separate [`123-mobile-track`](https://github.com/eamondoherty618-prog/123-mobile-track) repo.
 
 ## Conventions
 

@@ -1,14 +1,14 @@
+# PlatformIO / build
 .pio/
 .vscode/
 compile_commands.json
-data/*.jsonl
-.next/
-frontend/node_modules/
-frontend/.netlify/
-frontend/out/
 *.DS_Store
 
-# Personal/other-project files that live in this folder but are not firmware
+# Stray build/runtime artifacts (kept out even though the prototype is gone)
+.next/
+data/*.jsonl
+
+# Personal/other-project files that share this folder but aren't firmware
 *.skp
 *.zip
 fiber_laser_*
