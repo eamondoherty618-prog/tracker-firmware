@@ -250,7 +250,7 @@ bool installDriver(bool listenOnly) {
   twai_general_config_t g = TWAI_GENERAL_CONFIG_DEFAULT(
       (gpio_num_t)TRACKER_CAN_TX_GPIO, (gpio_num_t)TRACKER_CAN_RX_GPIO,
       listenOnly ? TWAI_MODE_LISTEN_ONLY : TWAI_MODE_NORMAL);
-  g.rx_queue_len = 16;
+  g.rx_queue_len = 32;
   g.tx_queue_len = 4;
   twai_timing_config_t t = TWAI_TIMING_CONFIG_500KBITS();
   twai_filter_config_t f = TWAI_FILTER_CONFIG_ACCEPT_ALL();
@@ -293,6 +293,102 @@ void startProbe() {
 
 void canObd2Init() {
   for (size_t i = 0; i < kPidCount; i++) { g_pidValue[i] = NAN; g_pidMs[i] = 0; }
+
+#if TRACKER_BENCH_DEBUG
+  // RX idle check: a powered, healthy transceiver holds RXD HIGH (recessive)
+  // when the bus is quiet. LOW/floating here = dead unit logic or a broken
+  // white lead — distinguishes them from ESP32-side faults without a meter.
+  pinMode(TRACKER_CAN_RX_GPIO, INPUT);
+  delay(5);
+  Serial.printf("CAN: RX line idle = %s (HIGH = transceiver alive)\n",
+                digitalRead(TRACKER_CAN_RX_GPIO) ? "HIGH" : "LOW");
+#endif
+
+#if TRACKER_BENCH_DEBUG && !TRACKER_CAN_LISTEN_ONLY_LOCK
+  // Line-load test: drive TX as a plain GPIO and read it back. A healthy,
+  // unpowered-or-listening transceiver input barely loads the pin; a damaged
+  // TXD input clamps it, and the readback disagrees with what we drive.
+  {
+    pinMode(TRACKER_CAN_TX_GPIO, OUTPUT);
+    digitalWrite(TRACKER_CAN_TX_GPIO, HIGH);
+    delayMicroseconds(50);
+    const int readHigh = digitalRead(TRACKER_CAN_TX_GPIO);
+    digitalWrite(TRACKER_CAN_TX_GPIO, LOW);
+    delayMicroseconds(50);
+    const int readLow = digitalRead(TRACKER_CAN_TX_GPIO);
+    digitalWrite(TRACKER_CAN_TX_GPIO, HIGH);  // leave recessive
+    Serial.printf("CAN: TX line-load test: drive HIGH reads %s, drive LOW reads %s%s\n",
+                  readHigh ? "HIGH" : "LOW", readLow ? "LOW(ok)" : "LOW(ok)",
+                  readHigh ? " — line free" : " — LINE CLAMPED (unit TXD input suspect)");
+    pinMode(TRACKER_CAN_TX_GPIO, INPUT);
+  }
+
+  // Desk self-test: transmit one frame in NO_ACK mode and listen for our own
+  // echo through the transceiver. Straight TX/RX wiring = echo received;
+  // crossed Grove leads = silence. This resolves the wiring question WITHOUT
+  // a vehicle (bench only — this mode transmits, so it is compiled out of
+  // bench_listen and must never run plugged into a live bus).
+  {
+    twai_general_config_t g = TWAI_GENERAL_CONFIG_DEFAULT(
+        (gpio_num_t)TRACKER_CAN_TX_GPIO, (gpio_num_t)TRACKER_CAN_RX_GPIO, TWAI_MODE_NO_ACK);
+    twai_timing_config_t t = TWAI_TIMING_CONFIG_500KBITS();
+    twai_filter_config_t f = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+    bool pass = false;
+    if (twai_driver_install(&g, &t, &f) == ESP_OK && twai_start() == ESP_OK) {
+      twai_message_t tx = {};
+      tx.identifier = 0x555;
+      tx.self = 1;               // self-reception request: loop back via the bus pins
+      tx.data_length_code = 2;
+      tx.data[0] = 0xAB; tx.data[1] = 0xCD;
+      if (twai_transmit(&tx, pdMS_TO_TICKS(100)) == ESP_OK) {
+        twai_message_t rx;
+        if (twai_receive(&rx, pdMS_TO_TICKS(300)) == ESP_OK && rx.identifier == 0x555) pass = true;
+      }
+      // Error autopsy: the counters say WHY an echo died. High bus/tx errors =
+      // we transmitted but the bus never reflected it (transceiver mute or
+      // dead driver). Clean counters + no echo = frame never made it out.
+      twai_status_info_t st;
+      if (twai_get_status_info(&st) == ESP_OK) {
+        Serial.printf("CAN: post-test state=%d tx_err=%lu rx_err=%lu bus_err=%lu tx_failed=%lu arb_lost=%lu\n",
+                      (int)st.state, (unsigned long)st.tx_error_counter, (unsigned long)st.rx_error_counter,
+                      (unsigned long)st.bus_error_count, (unsigned long)st.tx_failed_count,
+                      (unsigned long)st.arb_lost_count);
+      }
+      twai_stop();
+      twai_driver_uninstall();
+    }
+    Serial.println(pass
+      ? "CAN self-test: PASS — TX/RX wiring to the transceiver is good"
+      : "CAN self-test: FAIL — no echo; yellow/white Grove leads likely crossed (or unit unpowered)");
+
+    // Slow-speed retry: marginal/damaged analog paths sometimes pass at
+    // 125 kbps while failing at 500. A split verdict is its own fingerprint.
+    if (!pass) {
+      twai_general_config_t g2 = TWAI_GENERAL_CONFIG_DEFAULT(
+          (gpio_num_t)TRACKER_CAN_TX_GPIO, (gpio_num_t)TRACKER_CAN_RX_GPIO, TWAI_MODE_NO_ACK);
+      twai_timing_config_t t2 = TWAI_TIMING_CONFIG_125KBITS();
+      twai_filter_config_t f2 = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+      bool slowPass = false;
+      if (twai_driver_install(&g2, &t2, &f2) == ESP_OK && twai_start() == ESP_OK) {
+        twai_message_t tx2 = {};
+        tx2.identifier = 0x556;
+        tx2.self = 1;
+        tx2.data_length_code = 1;
+        tx2.data[0] = 0x5A;
+        if (twai_transmit(&tx2, pdMS_TO_TICKS(100)) == ESP_OK) {
+          twai_message_t rx2;
+          if (twai_receive(&rx2, pdMS_TO_TICKS(300)) == ESP_OK && rx2.identifier == 0x556) slowPass = true;
+        }
+        twai_stop();
+        twai_driver_uninstall();
+      }
+      Serial.println(slowPass
+        ? "CAN self-test @125k: PASS — analog path marginal at 500k (damaged but limping)"
+        : "CAN self-test @125k: FAIL — transmit path hard-dead at any speed");
+    }
+  }
+#endif
+
   startProbe();
 }
 
@@ -331,6 +427,17 @@ void canObd2Service(bool vehicleActive) {
     case BusState::UNINSTALLED:
       return;
     case BusState::LISTENING: {
+#if TRACKER_BENCH_DEBUG
+      // Silence must be visible: prove the listener is alive even when the
+      // bus is dead quiet (parked truck, desk bench, unplugged tap).
+      static uint32_t lastListenLogMs = 0;
+      if (now - lastListenLogMs >= 10000UL) {
+        lastListenLogMs = now;
+        Serial.printf("CAN: listening (%s), %lu frames heard\n",
+                      TRACKER_CAN_LISTEN_ONLY_LOCK ? "locked passive" : "pre-probe",
+                      (unsigned long)g_listenFrames);
+      }
+#endif
       // Count anything heard; healthy traffic ⇒ safe to speak. Silence for
       // the whole window ⇒ treat as absent (or parked) and stay passive.
       twai_message_t msg;
@@ -348,7 +455,12 @@ void canObd2Service(bool vehicleActive) {
         // a laptop.
         return;
       }
-      if (g_listenFrames >= 20) {
+      // Threshold/window tuned on a live 2017 Silverado: the main loop blocks
+      // for seconds at a time during boot (modem bring-up), so early drains
+      // only catch a queue's worth of frames — 5s was expiring before 20
+      // frames ever accumulated even on a roaring bus. 5 real frames is
+      // already unambiguous; give the window 30s to survive boot congestion.
+      if (g_listenFrames >= 5) {
         // Real traffic at 500k confirmed — switch to normal mode and probe.
         teardownDriver();
         if (!installDriver(false)) { g_state = BusState::ABSENT; g_nextProbeMs = now + TRACKER_OBD_REPROBE_MS; return; }
@@ -356,7 +468,7 @@ void canObd2Service(bool vehicleActive) {
         g_state = BusState::PROBING;
         g_probeAttempts = 0;
         g_extended = false;
-      } else if (now - g_listenStartMs > 5000) {
+      } else if (now - g_listenStartMs > 30000) {
         goAbsent();
       }
       return;
