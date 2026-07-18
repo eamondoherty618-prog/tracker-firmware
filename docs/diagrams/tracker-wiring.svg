@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="820" viewBox="0 0 1200 820" role="img" aria-labelledby="title desc">
+  <title id="title">Tracker wiring diagram</title>
+  <desc id="desc">Wiring diagram for LilyGo T-SIM7000G tracker with vehicle power, CAN add-on, OBD2 connector, and ADXL375 accelerometer.</desc>
+  <defs>
+    <style>
+      .bg{fill:#fff}
+      .box{fill:#f7f7f7;stroke:#111;stroke-width:2}
+      .pin{fill:#fff;stroke:#111;stroke-width:1.5}
+      .title{font:24px sans-serif;font-weight:700;fill:#111}
+      .text{font:18px sans-serif;fill:#111}
+      .tiny{font:15px sans-serif;fill:#333}
+      .wire{stroke:#111;stroke-width:3;fill:none}
+      .power{stroke:#b00020;stroke-width:4;fill:none}
+      .ground{stroke:#333;stroke-width:4;fill:none}
+      .canh{stroke:#0a7f38;stroke-width:4;fill:none}
+      .canl{stroke:#c77b00;stroke-width:4;fill:none}
+      .i2c{stroke:#0057b8;stroke-width:3;fill:none}
+    </style>
+  </defs>
+  <rect class="bg" width="1200" height="820"/>
+  <text x="60" y="62" class="title">Tracker wiring: vehicle power, CAN, and impact sensor</text>
+  <rect x="90" y="160" width="300" height="430" rx="10" class="box"/>
+  <text x="126" y="210" class="title">LilyGo T-SIM7000G</text>
+  <text x="126" y="246" class="text">Main tracker board</text>
+  <rect x="130" y="300" width="74" height="34" rx="4" class="pin"/>
+  <text x="144" y="322" class="tiny">VIN 5V</text>
+  <rect x="130" y="350" width="74" height="34" rx="4" class="pin"/>
+  <text x="150" y="372" class="tiny">GND</text>
+  <rect x="276" y="300" width="74" height="34" rx="4" class="pin"/>
+  <text x="294" y="322" class="tiny">GPIO32</text>
+  <rect x="276" y="350" width="74" height="34" rx="4" class="pin"/>
+  <text x="294" y="372" class="tiny">GPIO33</text>
+  <rect x="276" y="420" width="74" height="34" rx="4" class="pin"/>
+  <text x="294" y="442" class="tiny">GPIO21</text>
+  <rect x="276" y="470" width="74" height="34" rx="4" class="pin"/>
+  <text x="294" y="492" class="tiny">GPIO22</text>
+  <rect x="276" y="520" width="74" height="34" rx="4" class="pin"/>
+  <text x="294" y="542" class="tiny">GPIO34</text>
+  <text x="126" y="642" class="tiny">Modem UART and microSD are onboard.</text>
+  <rect x="70" y="690" width="340" height="72" rx="8" class="box"/>
+  <text x="98" y="724" class="text">Vehicle 12V -> protected buck -> 5V</text>
+  <text x="98" y="750" class="tiny">Backup battery buffers modem current bursts.</text>
+  <path d="M240 690 V590" class="power"/>
+  <path d="M240 590 H130 V317" class="power"/>
+  <path d="M275 690 V590" class="ground"/>
+  <path d="M275 590 H130 V367" class="ground"/>
+  <rect x="530" y="170" width="250" height="190" rx="10" class="box"/>
+  <text x="566" y="218" class="title">CAN Module</text>
+  <text x="566" y="250" class="text">TJA1051T / carrier</text>
+  <text x="566" y="286" class="tiny">TXD -> GPIO32</text>
+  <text x="566" y="312" class="tiny">RXD -> GPIO33</text>
+  <text x="566" y="338" class="tiny">5V from tracker VIN</text>
+  <path d="M350 317 H530" class="wire"/>
+  <path d="M350 367 H530" class="wire"/>
+  <path d="M204 317 C430 120 500 205 530 235" class="power"/>
+  <path d="M204 367 C420 400 500 325 530 315" class="ground"/>
+  <rect x="890" y="170" width="220" height="190" rx="10" class="box"/>
+  <text x="934" y="218" class="title">OBD2</text>
+  <text x="934" y="250" class="text">Vehicle plug</text>
+  <text x="934" y="286" class="tiny">Pin 6 CAN-H</text>
+  <text x="934" y="312" class="tiny">Pin 14 CAN-L</text>
+  <text x="934" y="338" class="tiny">Pin 4 GND</text>
+  <path d="M780 250 H890" class="canh"/>
+  <path d="M780 288 H890" class="canl"/>
+  <path d="M780 326 H890" class="ground"/>
+  <rect x="530" y="450" width="250" height="170" rx="10" class="box"/>
+  <text x="566" y="498" class="title">ADXL375</text>
+  <text x="566" y="530" class="text">Impact sensor</text>
+  <text x="566" y="566" class="tiny">SDA -> GPIO21</text>
+  <text x="566" y="592" class="tiny">SCL -> GPIO22</text>
+  <text x="566" y="618" class="tiny">3.3V only, CS high</text>
+  <path d="M350 437 H530" class="i2c"/>
+  <path d="M350 487 H530" class="i2c"/>
+  <path d="M350 537 H530" class="wire"/>
+  <text x="812" y="520" class="text">Important checks</text>
+  <text x="812" y="554" class="tiny">Do not wire OBD pin 16 to CAN HV.</text>
+  <text x="812" y="580" class="tiny">Remove 120R CAN terminator for vehicle tap.</text>
+  <text x="812" y="606" class="tiny">Use listen-only build for first live test.</text>
+</svg>

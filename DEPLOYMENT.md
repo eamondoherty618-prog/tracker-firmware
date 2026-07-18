@@ -3,6 +3,9 @@
 Use this guide when you are setting up a new tracker, recovering a tracker in
 the field, or wiring optional add-on hardware.
 
+For a printable start-to-finish shop guide with diagrams, start with
+[Build one tracker](docs/build-one-tracker.md).
+
 If you just want the wiring and pinout, start with
 [Hardware wiring](docs/hardware-wiring.md). If you want the overall system
 flow, start with [Project map](docs/project-map.md).

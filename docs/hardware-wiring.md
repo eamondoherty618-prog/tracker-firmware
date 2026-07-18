@@ -6,6 +6,8 @@ in this repo.
 The KiCad carrier-board source is in `hardware/obd_tracker_carrier_v1/`.
 Generated zip packages and KiCad lock/session files stay out of Git.
 
+![Tracker wiring](diagrams/tracker-wiring.svg)
+
 ## Core board
 
 The main board is a `LilyGo T-SIM7000G`.
@@ -21,6 +23,8 @@ The main board is a `LilyGo T-SIM7000G`.
 ## CAN / OBD2 add-on
 
 The CAN module is passive unless the firmware detects and uses it.
+
+![OBD2 pinout](diagrams/obd-pinout.svg)
 
 | CAN module terminal | Connect to |
 |---|---|

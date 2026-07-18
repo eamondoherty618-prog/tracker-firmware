@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="620" viewBox="0 0 1000 620" role="img" aria-labelledby="title desc">
+  <title id="title">OBD2 connector pinout for tracker CAN tap</title>
+  <desc id="desc">Front-view OBD2 pinout highlighting ground pin 4, CAN-H pin 6, CAN-L pin 14, and warning not to use pin 16 for CAN board power.</desc>
+  <defs>
+    <style>
+      .bg{fill:#fff}
+      .shell{fill:#f7f7f7;stroke:#111;stroke-width:3}
+      .pin{fill:#fff;stroke:#111;stroke-width:2}
+      .gnd{fill:#333;stroke:#111;stroke-width:2}
+      .canh{fill:#42c06b;stroke:#111;stroke-width:2}
+      .canl{fill:#f0b34a;stroke:#111;stroke-width:2}
+      .avoid{fill:#ffdddd;stroke:#b00020;stroke-width:3}
+      .title{font:28px sans-serif;font-weight:700;fill:#111}
+      .text{font:19px sans-serif;fill:#111}
+      .small{font:16px sans-serif;fill:#333}
+      .num{font:18px sans-serif;font-weight:700;fill:#111;text-anchor:middle;dominant-baseline:middle}
+      .white{font:18px sans-serif;font-weight:700;fill:#fff;text-anchor:middle;dominant-baseline:middle}
+      .legendLight{font:18px sans-serif;font-weight:700;fill:#fff}
+      .legendDark{font:18px sans-serif;font-weight:700;fill:#111}
+    </style>
+  </defs>
+  <rect class="bg" width="1000" height="620"/>
+  <text x="60" y="62" class="title">OBD2 CAN tap pinout</text>
+  <text x="60" y="94" class="small">Front view looking into the vehicle socket. Male plug backshell is mirrored.</text>
+  <path class="shell" d="M170 155 H830 L780 440 H220 Z"/>
+  <g transform="translate(235 215)">
+    <rect class="pin" x="0" y="0" width="58" height="42" rx="7"/><text class="num" x="29" y="21">1</text>
+    <rect class="pin" x="72" y="0" width="58" height="42" rx="7"/><text class="num" x="101" y="21">2</text>
+    <rect class="pin" x="144" y="0" width="58" height="42" rx="7"/><text class="num" x="173" y="21">3</text>
+    <rect class="gnd" x="216" y="0" width="58" height="42" rx="7"/><text class="white" x="245" y="21">4</text>
+    <rect class="pin" x="288" y="0" width="58" height="42" rx="7"/><text class="num" x="317" y="21">5</text>
+    <rect class="canh" x="360" y="0" width="58" height="42" rx="7"/><text class="num" x="389" y="21">6</text>
+    <rect class="pin" x="432" y="0" width="58" height="42" rx="7"/><text class="num" x="461" y="21">7</text>
+    <rect class="pin" x="504" y="0" width="58" height="42" rx="7"/><text class="num" x="533" y="21">8</text>
+  </g>
+  <g transform="translate(235 325)">
+    <rect class="pin" x="0" y="0" width="58" height="42" rx="7"/><text class="num" x="29" y="21">9</text>
+    <rect class="pin" x="72" y="0" width="58" height="42" rx="7"/><text class="num" x="101" y="21">10</text>
+    <rect class="pin" x="144" y="0" width="58" height="42" rx="7"/><text class="num" x="173" y="21">11</text>
+    <rect class="pin" x="216" y="0" width="58" height="42" rx="7"/><text class="num" x="245" y="21">12</text>
+    <rect class="pin" x="288" y="0" width="58" height="42" rx="7"/><text class="num" x="317" y="21">13</text>
+    <rect class="canl" x="360" y="0" width="58" height="42" rx="7"/><text class="num" x="389" y="21">14</text>
+    <rect class="pin" x="432" y="0" width="58" height="42" rx="7"/><text class="num" x="461" y="21">15</text>
+    <rect class="avoid" x="504" y="0" width="58" height="42" rx="7"/><text class="num" x="533" y="21">16</text>
+  </g>
+  <rect x="120" y="500" width="210" height="52" rx="7" class="gnd"/>
+  <text x="146" y="532" class="legendLight">Pin 4: Ground</text>
+  <rect x="370" y="500" width="210" height="52" rx="7" class="canh"/>
+  <text x="396" y="532" class="legendDark">Pin 6: CAN-H</text>
+  <rect x="620" y="500" width="210" height="52" rx="7" class="canl"/>
+  <text x="646" y="532" class="legendDark">Pin 14: CAN-L</text>
+  <text x="120" y="586" class="text">Pin 16 is vehicle battery power. Do not feed it to the CAN board HV input.</text>
+</svg>

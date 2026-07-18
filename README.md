@@ -7,6 +7,7 @@ Current firmware: `v0.11.1`
 
 ## Start here
 
+- [Build one tracker](docs/build-one-tracker.md)
 - [Project map](docs/project-map.md)
 - [Hardware wiring](docs/hardware-wiring.md)
 - [Deployment guide](DEPLOYMENT.md)
@@ -21,7 +22,7 @@ Current firmware: `v0.11.1`
 | `deploy_firmware.sh` | Build and publish an OTA firmware release. |
 | `fleet_inventory.csv` | Flash log for boards that have been provisioned. |
 | `hardware/obd_tracker_carrier_v1/` | KiCad carrier-board files, BOM, placement file, and mechanical references. |
-| `docs/` | Plain-English wiring and system overview. |
+| `docs/` | Plain-English build guide, diagrams, wiring, and system overview. |
 
 ## Quick build and flash
 
@@ -41,7 +42,8 @@ pio run -t upload
 5. OTA releases are published from this repo and pulled by the trackers on
    their next check-in.
 
-If you need the wiring details or the install order, use the two docs above.
+If you need the wiring details or the install order, start with the build guide
+above.
 
 ## Repo hygiene
 

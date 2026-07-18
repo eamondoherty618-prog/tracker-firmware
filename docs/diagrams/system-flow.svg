@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">123 Mobile Track system flow</title>
+  <desc id="desc">Block diagram showing the tracker, cellular network, backend, dashboard, app, OTA store, and firmware repo.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#111"/>
+    </marker>
+    <style>
+      .bg{fill:#fff}
+      .box{fill:#f7f7f7;stroke:#111;stroke-width:2}
+      .small{font:20px sans-serif;fill:#111}
+      .label{font:24px sans-serif;font-weight:700;fill:#111}
+      .note{font:17px sans-serif;fill:#333}
+      .line{stroke:#111;stroke-width:3;fill:none;marker-end:url(#arrow)}
+      .dash{stroke:#555;stroke-width:3;fill:none;stroke-dasharray:9 8;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect class="bg" width="1200" height="720"/>
+  <text x="60" y="64" class="label">123 Mobile Track: how everything talks</text>
+  <rect x="60" y="130" width="250" height="125" rx="8" class="box"/>
+  <text x="86" y="174" class="label">Tracker</text>
+  <text x="86" y="208" class="small">LilyGo T-SIM7000G</text>
+  <text x="86" y="236" class="note">GPS, BLE, CAN, impact</text>
+  <rect x="420" y="130" width="220" height="125" rx="8" class="box"/>
+  <text x="454" y="174" class="label">1NCE SIM</text>
+  <text x="454" y="208" class="small">Cellular data</text>
+  <text x="454" y="236" class="note">UDP + HTTPS fallback</text>
+  <rect x="750" y="130" width="260" height="125" rx="8" class="box"/>
+  <text x="786" y="174" class="label">Backend API</text>
+  <text x="786" y="208" class="small">123mobiletrack.com</text>
+  <text x="786" y="236" class="note">Telemetry, OTA, device state</text>
+  <path d="M310 192 H420" class="line"/>
+  <path d="M640 192 H750" class="line"/>
+  <text x="326" y="174" class="note">telemetry</text>
+  <text x="660" y="174" class="note">webhook / post</text>
+  <rect x="760" y="360" width="250" height="115" rx="8" class="box"/>
+  <text x="794" y="404" class="label">Dashboard</text>
+  <text x="794" y="438" class="small">Map, alerts, vehicles</text>
+  <path d="M880 255 V360" class="line"/>
+  <rect x="410" y="360" width="250" height="115" rx="8" class="box"/>
+  <text x="440" y="404" class="label">Mobile App</text>
+  <text x="440" y="438" class="small">BLE claim + adoption</text>
+  <path d="M300 255 C350 330 380 360 410 390" class="dash"/>
+  <path d="M410 430 C350 430 310 390 260 255" class="dash"/>
+  <text x="302" y="340" class="note">nearby BLE</text>
+  <rect x="60" y="520" width="270" height="115" rx="8" class="box"/>
+  <text x="92" y="564" class="label">This Repo</text>
+  <text x="92" y="598" class="small">Firmware + hardware docs</text>
+  <rect x="420" y="520" width="260" height="115" rx="8" class="box"/>
+  <text x="456" y="564" class="label">OTA Store</text>
+  <text x="456" y="598" class="small">Netlify Blobs firmware</text>
+  <path d="M330 578 H420" class="line"/>
+  <path d="M680 550 C800 520 850 430 870 255" class="line"/>
+  <text x="350" y="558" class="note">deploy_firmware.sh</text>
+  <text x="700" y="502" class="note">release metadata</text>
+</svg>

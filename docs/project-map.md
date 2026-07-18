@@ -7,16 +7,7 @@ cellular.
 
 ## One-minute overview
 
-```mermaid
-flowchart LR
-  Tracker["LilyGo T-SIM7000G tracker"] -->|GPS, BLE identity, modem telemetry| N1[1NCE SIM / cellular]
-  N1 -->|UDP or HTTPS telemetry| API["123mobiletrack.com API"]
-  API --> DASH["Dashboard / map / alerts / device pages"]
-  PHONE["Mobile app"] <-->|BLE claim/adopt| Tracker
-  API -->|OTA release info| Tracker
-  DEV["This repo: firmware + deploy scripts"] --> API
-  DEV --> OTA["Netlify Blobs OTA store"]
-```
+![System flow](diagrams/system-flow.svg)
 
 ## What lives where
 
