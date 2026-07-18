@@ -103,7 +103,8 @@
 // for 0x0C rpm / 0x0D speed / 0x05 coolant / 0x11 throttle; other PIDs report
 // their raw first byte as pid_XX.
 #define TRACKER_OBD_PIDS { 0x0C, 0x0D, 0x05, 0x11 }
-#define TRACKER_OBD_POLL_MS 5000UL       // full PID rotation period
+#define TRACKER_OBD_POLL_MS 5000UL       // full PID rotation period (on a trip)
+#define TRACKER_OBD_PARKED_POLL_MS 30000UL // per-PID gap while parked (idle detection)
 #define TRACKER_OBD_DTC_POLL_MS 60000UL  // stored/pending DTCs alternate here
 #define TRACKER_OBD_REPROBE_MS 300000UL  // absent bus: retry while driving
 

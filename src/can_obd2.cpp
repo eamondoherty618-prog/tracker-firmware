@@ -420,9 +420,11 @@ void canObd2Service(bool vehicleActive) {
 
   switch (g_state) {
     case BusState::ABSENT:
-      // Re-probe only while the vehicle is active: a parked car's bus is
-      // silent, and "silent" must not be confused with "not wired".
-      if (vehicleActive && (int32_t)(now - g_nextProbeMs) >= 0) startProbe();
+      // Re-probe on a timer regardless of trip state (the listen phase is
+      // passive and harmless on a sleeping bus). Field lesson: an unlucky
+      // boot window marked the bus absent and, gated on GPS-motion trips,
+      // never retried while the truck idled in the driveway for an hour.
+      if ((int32_t)(now - g_nextProbeMs) >= 0) startProbe();
       return;
     case BusState::UNINSTALLED:
       return;
@@ -519,7 +521,13 @@ void canObd2Service(bool vehicleActive) {
     startRequestForOp(op, 0);
     return;
   }
-  if (vehicleActive && now - g_lastPollMs >= TRACKER_OBD_POLL_MS / kPidCount) {
+  // PIDs poll on every READY bus, not just on trips: parked-with-engine-on is
+  // exactly the idling state the fleet features bill by, and trip detection is
+  // GPS-motion-based so it can never see it. Parked polls run at a relaxed
+  // cadence to keep bus chatter and data cost down.
+  const uint32_t pollGap = vehicleActive ? (TRACKER_OBD_POLL_MS / kPidCount)
+                                         : TRACKER_OBD_PARKED_POLL_MS;
+  if (now - g_lastPollMs >= pollGap) {
     g_lastPollMs = now;
     const uint8_t pid = kPids[g_pidIndex];
     g_pidIndex = (g_pidIndex + 1) % kPidCount;
