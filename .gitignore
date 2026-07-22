@@ -23,3 +23,7 @@ serve_skp_cors.py
 vintage-moto-ct-logo-options/
 vintage-moto-ct-logo-options-clean/
 assets/
+
+# Editor local-history artifacts
+.history/
+**/.history/
