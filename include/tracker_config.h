@@ -23,7 +23,7 @@
 #ifndef TRACKER_API_KEY
 #define TRACKER_API_KEY "c5cc56a23546eb487223fe810ae8a8b76d83376ee09140f7"
 #endif
-#define TRACKER_FIRMWARE_VERSION "0.11.4"
+#define TRACKER_FIRMWARE_VERSION "0.11.5"
 
 // VESTIGIAL: alternator-voltage ignition detection. This hardware uses a 12V→5V buck
 // with no voltage sense, and AT+CBC only reads the buffer LiPo (~3.8V), so these can
@@ -102,7 +102,7 @@
 // Mode 01 PIDs polled round-robin while the vehicle is active. Decoders exist
 // for 0x0C rpm / 0x0D speed / 0x05 coolant / 0x11 throttle; other PIDs report
 // their raw first byte as pid_XX.
-#define TRACKER_OBD_PIDS { 0x0C, 0x0D, 0x05, 0x11 }
+#define TRACKER_OBD_PIDS { 0x0C, 0x0D, 0x05, 0x11, 0x42, 0x2F, 0x10 }  // rpm,speed,coolant,throttle,voltage,fuel,MAF
 #define TRACKER_OBD_POLL_MS 5000UL       // full PID rotation period (on a trip)
 #define TRACKER_OBD_PARKED_POLL_MS 30000UL // per-PID gap while parked (idle detection)
 #define TRACKER_OBD_DTC_POLL_MS 60000UL  // stored/pending DTCs alternate here

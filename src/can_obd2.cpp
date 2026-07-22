@@ -148,8 +148,11 @@ void handlePidValue(uint8_t pid, const uint8_t* ab, uint16_t len) {
   switch (pid) {
     case 0x0C: if (len >= 2) v = ((ab[0] << 8) | ab[1]) / 4.0f; break;  // RPM
     case 0x0D: if (len >= 1) v = ab[0]; break;                          // km/h
-    case 0x05: if (len >= 1) v = (float)ab[0] - 40.0f; break;           // °C
-    case 0x11: if (len >= 1) v = ab[0] * 100.0f / 255.0f; break;        // %
+    case 0x05: if (len >= 1) v = (float)ab[0] - 40.0f; break;           // coolant °C
+    case 0x11: if (len >= 1) v = ab[0] * 100.0f / 255.0f; break;        // throttle %
+    case 0x42: if (len >= 2) v = ((ab[0] << 8) | ab[1]) / 1000.0f; break; // control module voltage
+    case 0x2F: if (len >= 1) v = ab[0] * 100.0f / 255.0f; break;        // fuel level %
+    case 0x10: if (len >= 2) v = ((ab[0] << 8) | ab[1]) / 100.0f; break; // MAF grams/sec
     default:   if (len >= 1) v = ab[0]; break;   // raw first byte for extra PIDs
   }
   for (size_t i = 0; i < kPidCount; i++) {
@@ -560,6 +563,11 @@ void canObd2AppendTelemetry(JsonDocument& doc, bool compact) {
         case 0x0D: obd["speed_kph"] = (int)g_pidValue[i]; break;
         case 0x05: obd["coolant_c"] = (int)g_pidValue[i]; break;
         case 0x11: obd["throttle_pct"] = (int)g_pidValue[i]; break;
+        // Voltage + fuel ride the compact/UDP payload too: they drive the
+        // battery-health, low-fuel, and fuel-theft alerts, which must fire
+        // without waiting for a full HTTPS heartbeat.
+        case 0x42: obd["volt"] = serialized(String(g_pidValue[i], 1)); break;
+        case 0x2F: obd["fuel_pct"] = (int)g_pidValue[i]; break;
         default: break;
       }
     }
@@ -581,6 +589,9 @@ void canObd2AppendTelemetry(JsonDocument& doc, bool compact) {
       case 0x0D: obd["speed_kph"] = (int)g_pidValue[i]; break;
       case 0x05: obd["coolant_c"] = (int)g_pidValue[i]; break;
       case 0x11: obd["throttle_pct"] = (int)g_pidValue[i]; break;
+      case 0x42: obd["volt"] = serialized(String(g_pidValue[i], 2)); break;      // control module V
+      case 0x2F: obd["fuel_pct"] = (int)g_pidValue[i]; break;                    // fuel level %
+      case 0x10: obd["maf_gps"] = serialized(String(g_pidValue[i], 1)); break;   // for MPG calc
       default: { char k[8]; snprintf(k, sizeof(k), "pid_%02x", kPids[i]); obd[k] = g_pidValue[i]; }
     }
   }
