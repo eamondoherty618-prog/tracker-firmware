@@ -293,6 +293,34 @@ void goAbsent() {
 uint32_t g_listenStartMs = 0;
 uint32_t g_listenFrames = 0;
 
+// Passive bus survey: an inventory of every CAN ID heard with its latest
+// payload bytes. This is the discovery tool for proprietary broadcasts the
+// standard OBD2 services can't reach (e.g. GM TPMS tire pressures): deflate a
+// tire, watch which ID's byte moves in telemetry. RX-only — gathering it
+// never transmits a single frame.
+struct SurveyEntry { uint32_t id; uint32_t count; uint8_t len; uint8_t data[8]; };
+constexpr size_t MAX_SURVEY = 48;
+SurveyEntry g_survey[MAX_SURVEY];
+size_t g_surveyCount = 0;
+
+void surveyFrame(const twai_message_t& msg) {
+  for (size_t i = 0; i < g_surveyCount; i++) {
+    if (g_survey[i].id == msg.identifier) {
+      g_survey[i].count++;
+      g_survey[i].len = msg.data_length_code;
+      memcpy(g_survey[i].data, msg.data, 8);
+      return;
+    }
+  }
+  if (g_surveyCount < MAX_SURVEY) {
+    SurveyEntry& e = g_survey[g_surveyCount++];
+    e.id = msg.identifier;
+    e.count = 1;
+    e.len = msg.data_length_code;
+    memcpy(e.data, msg.data, 8);
+  }
+}
+
 void startProbe() {
   // Phase 1: passive listen. Healthy 500k traffic (frames received, no bus
   // errors) is required before we ever transmit a bit.
@@ -439,7 +467,7 @@ void canObd2Service(bool vehicleActive) {
   // Drain everything the controller has for us — cheap, no blocking.
   if (g_state == BusState::PROBING || g_state == BusState::READY) {
     twai_message_t msg;
-    while (twai_receive(&msg, 0) == ESP_OK) handleFrame(msg);
+    while (twai_receive(&msg, 0) == ESP_OK) { surveyFrame(msg); handleFrame(msg); }
 
     // A wedged controller (no transceiver → no ACKs → bus-off) reads as absent.
     twai_status_info_t st;
@@ -479,6 +507,7 @@ void canObd2Service(bool vehicleActive) {
       twai_message_t msg;
       while (twai_receive(&msg, 0) == ESP_OK) {
         g_listenFrames++;
+        surveyFrame(msg);
 #if TRACKER_BENCH_DEBUG
         if (g_listenFrames <= 5) {
           Serial.printf("CAN LISTEN %08lx dlc=%d\n", (unsigned long)msg.identifier, msg.data_length_code);
@@ -601,6 +630,28 @@ void canObd2AppendTelemetry(JsonDocument& doc, bool compact) {
   if (g_state == BusState::LISTENING && g_listenFrames > 0) {
     obd["listen_frames"] = g_listenFrames;  // passive session: bus heard, not spoken to
   }
+
+  // Bus survey: rotating window of 10 entries per post ("id:count:hexbytes"),
+  // sweeping the whole table across consecutive posts — the full payload must
+  // stay under the modem's ~1 KB SHBOD body cap, so never ship all 48 at once.
+  if (g_surveyCount > 0) {
+    JsonArray sv = obd["can_ids"].to<JsonArray>();
+    static size_t cursor = 0;
+    const size_t n = g_surveyCount < 10 ? g_surveyCount : 10;
+    for (size_t k = 0; k < n; k++) {
+      const SurveyEntry& e = g_survey[(cursor + k) % g_surveyCount];
+      char hex[17];
+      const uint8_t hb = e.len > 8 ? 8 : e.len;
+      for (uint8_t b = 0; b < hb; b++) sprintf(hex + b * 2, "%02X", e.data[b]);
+      hex[hb * 2] = '\0';
+      char buf[40];
+      snprintf(buf, sizeof(buf), "%lX:%lu:%s", (unsigned long)e.id, (unsigned long)e.count, hex);
+      sv.add(String(buf));
+    }
+    cursor = (cursor + n) % g_surveyCount;
+    obd["can_ids_total"] = (int)g_surveyCount;
+  }
+
   if (!present) return;
   obd["addr"] = g_extended ? "29bit" : "11bit";
   for (size_t i = 0; i < kPidCount; i++) {
