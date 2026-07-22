@@ -23,7 +23,7 @@
 #ifndef TRACKER_API_KEY
 #define TRACKER_API_KEY "c5cc56a23546eb487223fe810ae8a8b76d83376ee09140f7"
 #endif
-#define TRACKER_FIRMWARE_VERSION "0.11.1"
+#define TRACKER_FIRMWARE_VERSION "0.11.4"
 
 // VESTIGIAL: alternator-voltage ignition detection. This hardware uses a 12V→5V buck
 // with no voltage sense, and AT+CBC only reads the buffer LiPo (~3.8V), so these can
@@ -107,6 +107,9 @@
 #define TRACKER_OBD_PARKED_POLL_MS 30000UL // per-PID gap while parked (idle detection)
 #define TRACKER_OBD_DTC_POLL_MS 60000UL  // stored/pending DTCs alternate here
 #define TRACKER_OBD_REPROBE_MS 300000UL  // absent bus: retry while driving
+// Post cadence while the engine is running (rpm-confirmed), idling or moving,
+// so the live vitals dash stays fresh. Highway still uses the 5s branch.
+#define TRACKER_OBD_ACTIVE_INTERVAL_MS 10000UL
 
 // ADXL375 high-g accelerometer (impact/tamper). INT1 wired to GPIO 34 for
 // future wake-from-deep-sleep (v1 leaves it unused).

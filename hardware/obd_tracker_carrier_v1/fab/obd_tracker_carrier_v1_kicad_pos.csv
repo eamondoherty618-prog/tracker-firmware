@@ -1,0 +1,48 @@
+Ref,Val,Package,PosX,PosY,Rot,Side
+"BT1","Single 18650 holder alternate footprint","BatteryHolder_18650",46.000000,-20.000000,0.000000,bottom
+"C1","10uF 50V input cap","SMD_2Pad",31.000000,-5.000000,0.000000,bottom
+"C2","10uF 50V input cap","SMD_2Pad",31.000000,-9.000000,0.000000,bottom
+"C3","47uF 10V output cap","SMD_2Pad",57.000000,-5.400000,0.000000,bottom
+"C4","47uF 10V output cap","SMD_2Pad",57.000000,-9.600000,0.000000,bottom
+"C5","100nF bootstrap","SMD_2Pad",43.000000,-3.400000,0.000000,bottom
+"C6","Compensation cap placeholder","SMD_2Pad",39.000000,-3.000000,0.000000,bottom
+"C7","100nF CAN VCC","SMD_2Pad",64.000000,-36.000000,0.000000,bottom
+"C8","100nF CAN VIO","SMD_2Pad",57.000000,-36.000000,0.000000,bottom
+"C9","100nF accel decoupling","SMD_2Pad",72.000000,-5.000000,0.000000,bottom
+"C10","1uF accel decoupling","SMD_2Pad",79.000000,-5.000000,0.000000,bottom
+"C11","100nF vehicle ADC filter","SMD_2Pad",40.000000,-34.800000,0.000000,bottom
+"C12","100nF battery ADC filter","SMD_2Pad",55.000000,-34.800000,0.000000,bottom
+"D1","B560C/SS56 reverse Schottky","SMD_2Pad",24.000000,-8.200000,0.000000,bottom
+"D2","SMBJ33A load-dump TVS","SMD_2Pad",15.500000,-14.300000,0.000000,bottom
+"D3","B560C buck catch diode","SMD_2Pad",45.000000,-13.400000,0.000000,bottom
+"D4","CAN ESD protector, SOT-23","SOT-23",13.500000,-25.800000,0.000000,bottom
+"F1","2A resettable fuse, 1812","SMD_2Pad",15.500000,-8.200000,0.000000,bottom
+"JP1","Optional CAN termination solder jumper, open by default","SolderJumper_2_Open",68.500000,-28.500000,0.000000,bottom
+"L1","15uH shielded inductor >=4A","SMD_2Pad",49.000000,-7.700000,0.000000,bottom
+"L2","CAN common-mode choke DNP/0R bypass","CommonModeChoke_CAN",22.500000,-25.000000,0.000000,bottom
+"R1","100k vehicle ADC top","SMD_2Pad",30.000000,-34.800000,0.000000,bottom
+"R2","20.0k vehicle ADC bottom","SMD_2Pad",35.000000,-34.800000,0.000000,bottom
+"R3","1.0M battery ADC top","SMD_2Pad",45.000000,-34.800000,0.000000,bottom
+"R4","1.0M battery ADC bottom","SMD_2Pad",50.000000,-34.800000,0.000000,bottom
+"R5","52.3k 1% FB top","SMD_2Pad",53.000000,-13.500000,0.000000,bottom
+"R6","10.0k 1% FB bottom","SMD_2Pad",58.000000,-13.500000,0.000000,bottom
+"R7","200k EN top","SMD_2Pad",35.000000,-13.500000,0.000000,bottom
+"R8","49.9k EN bottom","SMD_2Pad",39.500000,-13.500000,0.000000,bottom
+"R9","200k RT","SMD_2Pad",34.000000,-3.000000,0.000000,bottom
+"R10","120R CAN termination DNP","SMD_2Pad",72.500000,-31.500000,0.000000,bottom
+"R11","4.7k I2C SDA pull-up","SMD_2Pad",70.000000,-12.300000,0.000000,bottom
+"R12","4.7k I2C SCL pull-up","SMD_2Pad",75.000000,-12.300000,0.000000,bottom
+"R13","100k INT1 pulldown","SMD_2Pad",80.000000,-12.300000,0.000000,bottom
+"U2","TPS54360DDAR 12V-to-5V buck","TI_SO-PowerPAD-8",38.500000,-7.700000,0.000000,bottom
+"U3","TJA1051T/3 5V CAN transceiver","SOIC-8_3.9x4.9mm_P1.27mm",60.500000,-33.000000,0.000000,bottom
+"U4","ADXL375BCCZ-RL7","ADXL375_LGA-14",75.500000,-8.000000,0.000000,bottom
+"D5","Green status LED","SMD_2Pad",80.000000,-35.500000,0.000000,top
+"H1","M2.5 mounting hole","MountingHole_M2.5",4.000000,-4.000000,0.000000,top
+"H2","M2.5 mounting hole","MountingHole_M2.5",84.000000,-4.000000,0.000000,top
+"H3","M2.5 mounting hole","MountingHole_M2.5",84.000000,-36.000000,0.000000,top
+"H4","M2.5 mounting hole","MountingHole_M2.5",4.000000,-36.000000,0.000000,top
+"J1","OBD2 harness 12V/GND/CANH/CANL","Harness_4P_2.54",7.000000,-20.000000,0.000000,top
+"J2","JST-PH-2 LiPo, populate instead of BT1","JST_PH_S2B-PH-SM4-TB",10.000000,-32.500000,0.000000,top
+"J3A","T-SIM7000G low profile header rail","TSIM_Header_Rail",19.200000,-7.300000,0.000000,top
+"J3B","T-SIM7000G low profile header rail","TSIM_Header_Rail",82.800000,-7.300000,0.000000,top
+"R15","1k LED series","SMD_2Pad",74.000000,-35.500000,0.000000,top

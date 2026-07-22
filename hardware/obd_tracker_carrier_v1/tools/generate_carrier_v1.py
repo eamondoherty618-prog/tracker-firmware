@@ -39,6 +39,7 @@ BAT18650_W = 76.0
 BAT18650_H = 21.0
 NOW = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 NAMESPACE = uuid.UUID("3f2cfa89-842e-4e21-a614-2d527f6624c0")
+PAD_COUNTER = 0
 
 
 NETS = [
@@ -79,6 +80,12 @@ NET_ID = {name: i + 1 for i, name in enumerate(NETS)}
 
 def uid(name: str) -> str:
     return str(uuid.uuid5(NAMESPACE, name))
+
+
+def pad_uid() -> str:
+    global PAD_COUNTER
+    PAD_COUNTER += 1
+    return uid(f"pad-{PAD_COUNTER}")
 
 
 def net(name: str | None) -> str:
@@ -124,6 +131,7 @@ def footprint(ref: str, value: str, at: tuple[float, float], layer: str, body: l
             fp_text("reference", ref, 0, -2.3, side_silk, 0.85),
             fp_text("value", value, 0, 2.3, side_fab, 0.75),
             *body,
+            "    (embedded_fonts no)",
             "  )",
         ]
     )
@@ -144,7 +152,7 @@ def pth_pad(
     return (
         f'    (pad "{num}" thru_hole {shape} (at {fmt(x)} {fmt(y)}) '
         f'(size {fmt(size[0])} {fmt(size[1])}) (drill {fmt(drill)}) '
-        f'(layers "*.Cu" "*.Mask"){extra}{fn})'
+        f'(layers "*.Cu" "*.Mask"){extra}{fn} (uuid "{pad_uid()}"))'
     )
 
 
@@ -167,7 +175,7 @@ def smd_pad(
     fn = f' (pinfunction "{pinfunction}") (pintype "passive")' if pinfunction else ""
     return (
         f'    (pad "{num}" smd {shape} (at {fmt(x)} {fmt(y)}{angle}) '
-        f'(size {fmt(size[0])} {fmt(size[1])}) (layers "{cu}" "{paste}" "{mask}"){extra}{fn})'
+        f'(size {fmt(size[0])} {fmt(size[1])}) (layers "{cu}" "{paste}" "{mask}"){extra}{fn} (uuid "{pad_uid()}"))'
     )
 
 
@@ -182,8 +190,8 @@ def rect_body(w: float, h: float, layer: str) -> list[str]:
 
 def make_mount(ref: str, x: float, y: float) -> str:
     body = [
-        f'    (pad "" np_thru_hole circle (at 0 0) (size {fmt(MOUNT_COPPER)} {fmt(MOUNT_COPPER)}) '
-        f'(drill {fmt(MOUNT_DRILL)}) (layers "*.Cu" "*.Mask"))',
+        f'    (pad "" np_thru_hole circle (at 0 0) (size {fmt(MOUNT_DRILL)} {fmt(MOUNT_DRILL)}) '
+        f'(drill {fmt(MOUNT_DRILL)}) (layers "*.Cu" "*.Mask") (uuid "{pad_uid()}"))',
         fp_text("user", ref, 0, -4.0, "F.SilkS", 0.8),
     ]
     return footprint(ref, "M2.5 mounting hole", (x, y), "F.Cu", body, "OBDCarrier:MountingHole_M2.5")
@@ -239,9 +247,9 @@ def make_tps54360() -> str:
         2: "VIN_PROT",
         3: "BUCK_EN",
         4: "BUCK_RT",
-        5: "GND",
+        5: "BUCK_FB",
         6: "BUCK_COMP",
-        7: "BUCK_FB",
+        7: "GND",
         8: "BUCK_SW",
     }
     body = rect_body(5.3, 6.5, silk)
@@ -257,22 +265,24 @@ def make_tps54360() -> str:
 def make_adxl375() -> str:
     layer = "B.Cu"
     silk = "B.SilkS"
-    # Simplified LGA-14 pad field. Pin naming follows the design nets, not full datasheet pin order.
+    # ADXL375 14-LGA pinout:
+    # 1 VDDIO, 2 GND, 3 RESERVED, 4 GND, 5 GND, 6 VS, 7 CS,
+    # 8 INT1, 9 INT2, 10 NC, 11 RESERVED, 12 SDO/ALT ADDRESS, 13 SDA, 14 SCL.
     pads = [
-        ("1", -1.5, -1.5, "GND", "GND"),
-        ("2", -0.5, -1.5, "+3V3", "VS"),
-        ("3", 0.5, -1.5, "+3V3", "VDDIO"),
-        ("4", 1.5, -1.5, "I2C_SCL_GPIO22", "SCL"),
-        ("5", 1.5, -0.5, "I2C_SDA_GPIO21", "SDA"),
-        ("6", 1.5, 0.5, "ACCEL_INT1_GPIO34", "INT1"),
-        ("7", 1.5, 1.5, None, "INT2_NC"),
-        ("8", 0.5, 1.5, "+3V3", "CS_HIGH"),
-        ("9", -0.5, 1.5, "GND", "SDO_LOW"),
+        ("1", -1.5, -1.5, "+3V3", "VDDIO"),
+        ("2", -0.5, -1.5, "GND", "GND"),
+        ("3", 0.5, -1.5, "+3V3", "RES_TO_VS"),
+        ("4", 1.5, -1.5, "GND", "GND"),
+        ("5", 1.5, -0.5, "GND", "GND"),
+        ("6", 1.5, 0.5, "+3V3", "VS"),
+        ("7", 1.5, 1.5, "+3V3", "CS_HIGH"),
+        ("8", 0.5, 1.5, "ACCEL_INT1_GPIO34", "INT1"),
+        ("9", -0.5, 1.5, None, "INT2_NC"),
         ("10", -1.5, 1.5, "GND", "GND"),
         ("11", -1.5, 0.5, None, "NC"),
-        ("12", -1.5, -0.5, None, "NC"),
-        ("13", -0.5, 0, "GND", "EP_GND"),
-        ("14", 0.5, 0, "GND", "EP_GND"),
+        ("12", -1.5, -0.5, "GND", "SDO_LOW"),
+        ("13", -0.5, 0, "I2C_SDA_GPIO21", "SDA"),
+        ("14", 0.5, 0, "I2C_SCL_GPIO22", "SCL"),
     ]
     body = rect_body(4.2, 4.2, silk)
     for num, x, y, n, _ in pads:
@@ -460,37 +470,61 @@ def make_footprints() -> list[str]:
 
 
 def make_segments() -> list[str]:
-    # This is a baseline routing scaffold: heavy power and CAN paths are drawn
-    # explicitly, while KiCad ratlines/net classes should be used to complete DRC.
-    segs: list[tuple[float, float, float, float, float, str, str]] = [
-        (7.0, 16.19, 13.7, 8.2, 0.8, "F.Cu", "VIN_OBD"),
-        (17.3, 8.2, 21.9, 8.2, 1.2, "B.Cu", "VIN_FUSED"),
-        (26.1, 8.2, 35.75, 7.7, 1.2, "B.Cu", "VIN_PROT"),
-        (51.6, 7.7, 55.4, 5.4, 1.2, "B.Cu", "+5V"),
-        (55.4, 5.4, 19.2, 7.3, 0.9, "B.Cu", "+5V"),
-        (7.0, 18.73, 7.0, 35.5, 1.0, "F.Cu", "GND"),
-        (7.0, 21.27, 20.8, 24.2, 0.25, "F.Cu", "CANH_OBD"),
-        (7.0, 23.81, 20.8, 25.8, 0.25, "F.Cu", "CANL_OBD"),
-        (24.2, 24.2, 57.9, 32.2, 0.25, "B.Cu", "CANH"),
-        (24.2, 25.8, 57.9, 33.8, 0.25, "B.Cu", "CANL"),
-        (19.2, 19.999, 57.9, 31.095, 0.2, "F.Cu", "CAN_TX_GPIO32"),
-        (19.2, 22.539, 57.9, 34.905, 0.2, "F.Cu", "CAN_RX_GPIO33"),
-        (19.2, 14.919, 73.5, 8.5, 0.18, "F.Cu", "I2C_SDA_GPIO21"),
-        (19.2, 17.459, 77.0, 6.5, 0.18, "F.Cu", "I2C_SCL_GPIO22"),
-        (19.2, 25.079, 77.0, 8.5, 0.18, "F.Cu", "ACCEL_INT1_GPIO34"),
-        (19.2, 27.619, 32.0, 34.8, 0.18, "F.Cu", "VEH_SENSE_GPIO35"),
-        (19.2, 30.159, 47.0, 34.8, 0.18, "F.Cu", "VBAT_SENSE_GPIO36"),
-        (19.2, 32.699, 74.0, 35.5, 0.18, "F.Cu", "STATUS_LED_GPIO23"),
-        (74.6, 35.5, 79.3, 35.5, 0.18, "F.Cu", "LED_A"),
-        (10.0, 32.5, 82.8, 7.3, 0.35, "F.Cu", "VBAT"),
+    # Baseline routing scaffold. Through-hole LilyGo and OBD pads can be picked up
+    # on either side, so bottom-side SMD circuitry is routed on B.Cu here.
+    routes: list[tuple[str, str, float, str, list[tuple[float, float]]]] = [
+        ("vin_obd", "VIN_OBD", 0.9, "B.Cu", [(7.0, 16.19), (7.0, 8.2), (13.7, 8.2)]),
+        ("vin_fused_main", "VIN_FUSED", 1.2, "B.Cu", [(17.3, 8.2), (21.9, 8.2)]),
+        ("vin_fused_tvs", "VIN_FUSED", 0.7, "B.Cu", [(17.3, 8.2), (17.3, 14.3), (13.3, 14.3)]),
+        ("vin_prot_buck", "VIN_PROT", 1.2, "B.Cu", [(26.1, 8.2), (31.0, 8.2), (31.0, 7.065), (35.75, 7.065)]),
+        ("vin_prot_c1", "VIN_PROT", 0.6, "B.Cu", [(31.0, 8.2), (30.0, 8.2), (30.0, 5.0)]),
+        ("vin_prot_c2", "VIN_PROT", 0.6, "B.Cu", [(31.0, 8.2), (30.0, 8.2), (30.0, 9.0)]),
+        ("vin_prot_adc", "VIN_PROT", 0.25, "B.Cu", [(31.0, 8.2), (29.35, 8.2), (29.35, 34.8)]),
+        ("buck_boot", "BUCK_BOOT", 0.25, "B.Cu", [(35.75, 5.795), (42.35, 5.795), (42.35, 3.4)]),
+        ("buck_en", "BUCK_EN", 0.25, "B.Cu", [(35.75, 8.335), (35.65, 8.335), (35.65, 13.5), (38.85, 13.5)]),
+        ("buck_rt", "BUCK_RT", 0.25, "B.Cu", [(35.75, 9.605), (33.35, 9.605), (33.35, 3.0)]),
+        ("buck_comp", "BUCK_COMP", 0.25, "B.Cu", [(41.25, 8.335), (38.35, 8.335), (38.35, 3.0)]),
+        ("buck_fb", "BUCK_FB", 0.25, "B.Cu", [(41.25, 9.605), (41.25, 13.5), (53.65, 13.5), (57.35, 13.5)]),
+        ("buck_sw_l1", "BUCK_SW", 1.0, "B.Cu", [(41.25, 5.795), (44.0, 5.795), (44.0, 7.7), (46.4, 7.7)]),
+        ("buck_sw_catch", "BUCK_SW", 0.7, "B.Cu", [(44.0, 7.7), (47.1, 7.7), (47.1, 13.4)]),
+        ("rail_5v_output", "+5V", 1.1, "B.Cu", [(51.6, 7.7), (55.4, 7.7), (55.4, 5.4)]),
+        ("rail_5v_header", "+5V", 0.9, "B.Cu", [(51.6, 7.7), (30.0, 7.7), (30.0, 7.3), (19.2, 7.3)]),
+        ("rail_5v_can", "+5V", 0.45, "B.Cu", [(51.6, 7.7), (58.0, 7.7), (58.0, 33.635), (57.9, 33.635)]),
+        ("canh_obd_esd", "CANH_OBD", 0.25, "B.Cu", [(7.0, 21.27), (12.55, 21.27), (12.55, 26.5)]),
+        ("canh_obd_choke", "CANH_OBD", 0.25, "B.Cu", [(12.55, 26.5), (20.8, 26.5), (20.8, 24.2)]),
+        ("canl_obd_esd", "CANL_OBD", 0.25, "B.Cu", [(7.0, 23.81), (14.45, 23.81), (14.45, 25.8)]),
+        ("canl_obd_choke", "CANL_OBD", 0.25, "B.Cu", [(14.45, 25.8), (20.8, 25.8)]),
+        ("canh_bus", "CANH", 0.25, "B.Cu", [(24.2, 24.2), (40.0, 24.2), (40.0, 32.365), (63.1, 32.365)]),
+        ("canl_bus", "CANL", 0.25, "B.Cu", [(24.2, 25.8), (42.0, 25.8), (42.0, 33.635), (63.1, 33.635)]),
+        ("can_tx", "CAN_TX_GPIO32", 0.2, "B.Cu", [(19.2, 19.999), (52.0, 19.999), (52.0, 31.095), (57.9, 31.095)]),
+        ("can_rx", "CAN_RX_GPIO33", 0.2, "B.Cu", [(19.2, 22.539), (50.0, 22.539), (50.0, 34.905), (57.9, 34.905)]),
+        ("i2c_sda_pullup", "I2C_SDA_GPIO21", 0.18, "B.Cu", [(19.2, 14.919), (69.35, 14.919), (69.35, 12.3)]),
+        ("i2c_sda_accel", "I2C_SDA_GPIO21", 0.18, "B.Cu", [(69.35, 12.3), (75.0, 12.3), (75.0, 8.0)]),
+        ("i2c_scl_pullup", "I2C_SCL_GPIO22", 0.18, "B.Cu", [(19.2, 17.459), (74.35, 17.459), (74.35, 12.3)]),
+        ("i2c_scl_accel", "I2C_SCL_GPIO22", 0.18, "B.Cu", [(74.35, 12.3), (76.0, 12.3), (76.0, 8.0)]),
+        ("accel_int_pull", "ACCEL_INT1_GPIO34", 0.18, "B.Cu", [(19.2, 25.079), (79.35, 25.079), (79.35, 12.3)]),
+        ("accel_int_u4", "ACCEL_INT1_GPIO34", 0.18, "B.Cu", [(79.35, 12.3), (76.0, 12.3), (76.0, 9.5)]),
+        ("rail_3v3_pullups", "+3V3", 0.3, "B.Cu", [(19.2, 12.379), (70.65, 12.379), (70.65, 12.3), (75.65, 12.3)]),
+        ("rail_3v3_accel_1", "+3V3", 0.25, "B.Cu", [(70.65, 12.3), (74.0, 12.3), (74.0, 6.5)]),
+        ("rail_3v3_accel_3", "+3V3", 0.25, "B.Cu", [(75.65, 12.3), (76.0, 12.3), (76.0, 6.5)]),
+        ("rail_3v3_accel_6_7", "+3V3", 0.25, "B.Cu", [(75.65, 12.3), (77.0, 12.3), (77.0, 8.5), (77.0, 9.5)]),
+        ("rail_3v3_can_vio", "+3V3", 0.3, "B.Cu", [(19.2, 12.379), (18.0, 12.379), (18.0, 35.0), (63.1, 35.0), (63.1, 34.905)]),
+        ("vehicle_adc", "VEH_SENSE_GPIO35", 0.18, "B.Cu", [(19.2, 27.619), (30.65, 27.619), (30.65, 34.8), (39.35, 34.8)]),
+        ("battery_adc", "VBAT_SENSE_GPIO36", 0.18, "B.Cu", [(19.2, 30.159), (45.65, 30.159), (45.65, 34.8), (54.35, 34.8)]),
+        ("vbat_jst_to_lilygo", "VBAT", 0.35, "F.Cu", [(9.0, 32.5), (9.0, 35.0), (82.8, 35.0), (82.8, 7.3)]),
+        ("vbat_18650", "VBAT", 0.45, "B.Cu", [(13.0, 20.0), (13.0, 7.3), (82.8, 7.3)]),
+        ("vbat_adc", "VBAT", 0.25, "B.Cu", [(82.8, 7.3), (82.8, 34.8), (44.35, 34.8)]),
+        ("status_gpio", "STATUS_LED_GPIO23", 0.18, "F.Cu", [(19.2, 32.699), (74.0, 32.699), (74.0, 35.5)]),
+        ("status_led", "LED_A", 0.18, "F.Cu", [(74.6, 35.5), (79.3, 35.5)]),
     ]
     out: list[str] = []
-    for i, (x1, y1, x2, y2, width, layer, net_name) in enumerate(segs):
-        out.append(
-            f'  (segment (start {fmt(x1)} {fmt(y1)}) (end {fmt(x2)} {fmt(y2)}) '
-            f'(width {fmt(width)}) (layer "{layer}") {net(net_name)} '
-            f'(uuid "{uid(f"seg-{i}-{net_name}")}"))'
-        )
+    for route_name, net_name, width, layer, points in routes:
+        for i, ((x1, y1), (x2, y2)) in enumerate(zip(points, points[1:])):
+            out.append(
+                f'  (segment (start {fmt(x1)} {fmt(y1)}) (end {fmt(x2)} {fmt(y2)}) '
+                f'(width {fmt(width)}) (layer "{layer}") (net {NET_ID[net_name]}) '
+                f'(uuid "{uid(f"seg-{route_name}-{i}")}"))'
+            )
     return out
 
 
@@ -508,6 +542,8 @@ def make_zones() -> str:
 
 
 def make_kicad_pcb() -> str:
+    global PAD_COUNTER
+    PAD_COUNTER = 0
     nets = ["  (net 0 \"\")"] + [f'  (net {i + 1} "{n}")' for i, n in enumerate(NETS)]
     edge = [
         f'  (gr_line (start 0 0) (end {fmt(BOARD_W)} 0) (stroke (width 0.1) (type solid)) (layer "Edge.Cuts") (uuid "{uid("edge-top")}"))',
@@ -533,44 +569,8 @@ def make_kicad_pcb() -> str:
     setup = """
   (setup
     (pad_to_mask_clearance 0.05)
+    (allow_soldermask_bridges_in_footprints no)
     (solder_mask_min_width 0.1)
-    (pcbplotparams
-      (layerselection 0x00010fc_ffffffff)
-      (plot_on_all_layers_selection 0x0000000_00000000)
-      (disableapertmacros no)
-      (usegerberextensions no)
-      (usegerberattributes yes)
-      (usegerberadvancedattributes yes)
-      (creategerberjobfile yes)
-      (dashed_line_dash_ratio 12.000000)
-      (dashed_line_gap_ratio 3.000000)
-      (svguseinch no)
-      (svgprecision 6)
-      (plotframeref no)
-      (viasonmask no)
-      (mode 1)
-      (useauxorigin no)
-      (hpglpennumber 1)
-      (hpglpenspeed 20)
-      (hpglpendiameter 15.000000)
-      (pdf_front_fp_property_popups yes)
-      (pdf_back_fp_property_popups yes)
-      (dxfpolygonmode yes)
-      (dxfimperialunits no)
-      (dxfusepcbnewfont yes)
-      (psnegative no)
-      (psa4output no)
-      (plotreference yes)
-      (plotvalue yes)
-      (plotinvisibletext no)
-      (sketchpadsonfab no)
-      (subtractmaskfromsilk no)
-      (outputformat 1)
-      (mirror no)
-      (drillshape 1)
-      (scaleselection 1)
-      (outputdirectory "fab/")
-    )
   )
 """.rstrip()
     return "\n".join(
@@ -1084,6 +1084,7 @@ build, routed to the LilyGo battery/charger pins.
 
 - DNP R10/JP1 for normal vehicle installs. Only populate 120 ohm termination for bench setups or isolated test harnesses.
 - L2 CAN common-mode choke is optional. Populate a CAN choke or 0-ohm bypass links after EMI testing.
+- The generated routing scaffold uses bottom-layer orthogonal routes for bottom-side SMD circuitry, including CAN, TPS54360 support nets, ADXL375 I2C/INT, and ADC dividers.
 - Use short, twisted OBD harness conductors for CAN-H/CAN-L and keep the harness shield/return strategy consistent with the enclosure.
 - Place the ADXL375 side of the board against a rigid standoff area; avoid foam tape directly under the accelerometer if impact fidelity matters.
 - Verify the exact LilyGo T-SIM7000G board revision and header geometry before fab. This reference uses the user-supplied 66 x 27 mm target envelope.
@@ -1098,8 +1099,13 @@ build, routed to the LilyGo battery/charger pins.
 - `bom/{PROJECT}_bom.csv` - BOM with suggested MPNs and LCSC/JLCPCB fields to verify at order time.
 - `bom/{PROJECT}_netlist.csv` - readable netlist.
 - `fab/{PROJECT}_placement.csv` - placement/mechanical coordinate table.
+- `fab/{PROJECT}_stats.rpt` - KiCad-generated board statistics, created by the validation/export pass.
+- `fab/{PROJECT}_erc.rpt` - KiCad schematic ERC report, created by the validation/export pass.
+- `fab/VALIDATION.md` - validation commands and DRC limitation note.
 - `mechanical/{PROJECT}_outline.dxf` - exact 2D board outline/hole/envelope DXF.
 - `mechanical/{PROJECT}_board_reference.step` - simplified board envelope STEP.
+- `mechanical/{PROJECT}_kicad_board.step` - KiCad-generated board-only STEP, created by the validation/export pass.
+- `mechanical/kicad_dxf/` - KiCad-generated DXF exports for Edge.Cuts, Dwgs.User, and B.Fab.
 """
 
 

@@ -31,3 +31,8 @@ void canObd2AppendTelemetry(JsonDocument& doc, bool compact);
 void canObd2RequestClearDtc();
 
 bool canObd2Present();
+
+// True when a fresh OBD reading shows the engine turning (rpm above idle
+// floor). This is a real engine-on signal — unlike GPS motion — so the main
+// loop uses it to keep posting fast while idling, not just while moving.
+bool canObd2EngineRunning();

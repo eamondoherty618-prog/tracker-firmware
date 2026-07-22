@@ -399,6 +399,16 @@ void canObd2RequestClearDtc() {
 
 bool canObd2Present() { return g_state == BusState::READY; }
 
+bool canObd2EngineRunning() {
+  // Fresh RPM (0x0C) reading above the idle floor = engine on.
+  for (size_t i = 0; i < kPidCount; i++) {
+    if (kPids[i] == 0x0C) {
+      return g_pidMs[i] != 0 && (millis() - g_pidMs[i] < 15000UL) && g_pidValue[i] > 250.0f;
+    }
+  }
+  return false;
+}
+
 void canObd2Service(bool vehicleActive) {
   const uint32_t now = millis();
 

@@ -53,6 +53,7 @@ build, routed to the LilyGo battery/charger pins.
 
 - DNP R10/JP1 for normal vehicle installs. Only populate 120 ohm termination for bench setups or isolated test harnesses.
 - L2 CAN common-mode choke is optional. Populate a CAN choke or 0-ohm bypass links after EMI testing.
+- The generated routing scaffold uses bottom-layer orthogonal routes for bottom-side SMD circuitry, including CAN, TPS54360 support nets, ADXL375 I2C/INT, and ADC dividers.
 - Use short, twisted OBD harness conductors for CAN-H/CAN-L and keep the harness shield/return strategy consistent with the enclosure.
 - Place the ADXL375 side of the board against a rigid standoff area; avoid foam tape directly under the accelerometer if impact fidelity matters.
 - Verify the exact LilyGo T-SIM7000G board revision and header geometry before fab. This reference uses the user-supplied 66 x 27 mm target envelope.
@@ -67,5 +68,10 @@ build, routed to the LilyGo battery/charger pins.
 - `bom/obd_tracker_carrier_v1_bom.csv` - BOM with suggested MPNs and LCSC/JLCPCB fields to verify at order time.
 - `bom/obd_tracker_carrier_v1_netlist.csv` - readable netlist.
 - `fab/obd_tracker_carrier_v1_placement.csv` - placement/mechanical coordinate table.
+- `fab/obd_tracker_carrier_v1_stats.rpt` - KiCad-generated board statistics, created by the validation/export pass.
+- `fab/obd_tracker_carrier_v1_erc.rpt` - KiCad schematic ERC report, created by the validation/export pass.
+- `fab/VALIDATION.md` - validation commands and DRC limitation note.
 - `mechanical/obd_tracker_carrier_v1_outline.dxf` - exact 2D board outline/hole/envelope DXF.
 - `mechanical/obd_tracker_carrier_v1_board_reference.step` - simplified board envelope STEP.
+- `mechanical/obd_tracker_carrier_v1_kicad_board.step` - KiCad-generated board-only STEP, created by the validation/export pass.
+- `mechanical/kicad_dxf/` - KiCad-generated DXF exports for Edge.Cuts, Dwgs.User, and B.Fab.

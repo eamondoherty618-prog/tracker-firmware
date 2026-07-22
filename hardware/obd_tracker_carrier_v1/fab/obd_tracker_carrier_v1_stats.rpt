@@ -1,0 +1,57 @@
+PCB statistics report
+=====================
+- Date: Saturday, July 18, 2026 at 03:44:40 PM
+- Project: obd_tracker_carrier_v1
+- Board name: obd_tracker_carrier_v1
+
+Board
+-----
+- Width: 88.0000 mm
+- Height: 40.0000 mm
+- Area: 3520.00 mm²
+- Front copper area: 151.512 mm²
+- Back copper area: 583.47 mm²
+- Min track clearance: 0.0000 mm
+- Min track width: 0.1800 mm
+- Min drill diameter: 0.9000 mm
+- Board stackup thickness: 1.6000 mm
+
+- Front footprint area: 129.629 mm²
+- Back footprint area: 129.629 mm²
+- Front component density: 3.68 %
+- Back component density: 3.68 %
+Pads
+----
+- Through hole: 28
+- SMD: 106
+- Connector: 0
+- NPTH: 4
+- Castellated: 0
+- Press-fit: 0
+
+Vias
+----
+- Through vias: 0
+- Blind vias: 0
+- Buried vias: 0
+- Micro vias: 0
+
+Components
+----------
+
+|              | Front Side | Back Side | Total |
+|--------------|------------|-----------|-------|
+|THT:          |          0 |         0 |     0 |
+|SMD:          |          0 |         0 |     0 |
+|Unspecified:  |         10 |        37 |    47 |
+|Total:        |         10 |        37 |    47 |
+
+Drill holes
+-----------
+
+| Count | Shape |    X Size |    Y Size | Plated | Via/Pad | Start Layer | Stop Layer |
+|-------|-------|-----------|-----------|--------|---------|-------------|------------|
+|    22 | Round | 0.9000 mm | 0.9000 mm |    PTH |     Pad |        F.Cu |       B.Cu |
+|     4 | Round | 2.7000 mm | 2.7000 mm |   NPTH |     Pad |        F.Cu |       B.Cu |
+|     4 | Round | 1.0000 mm | 1.0000 mm |    PTH |     Pad |        F.Cu |       B.Cu |
+|     2 | Round | 1.5000 mm | 1.5000 mm |    PTH |     Pad |        F.Cu |       B.Cu |

@@ -2021,6 +2021,10 @@ bool postTelemetry(const String& body, bool forceReliable = false) {
 }
 
 uint32_t nextIntervalMs() {
+  // OBD gives a TRUE engine-on signal (rpm), unlike GPS motion. When the engine
+  // is running — idling or driving — keep the live dash fresh at the OBD-active
+  // cadence. Bounded to real engine-on time, and cheap over UDP.
+  if (canObd2EngineRunning()) return TRACKER_OBD_ACTIVE_INTERVAL_MS;
   if (!lastGpsQualityFix) return TRACKER_MOVING_INTERVAL_MS;  // seeking fix — stay fast
   if (isnan(lastSpeedKph) || lastSpeedKph < TRACKER_MIN_MOVING_SPEED_KPH) {
     if (ignitionOn) return 30000UL;  // idle engine: 30s
