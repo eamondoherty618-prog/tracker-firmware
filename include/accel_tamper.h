@@ -19,6 +19,11 @@ void accelAppendTelemetry(JsonDocument& doc, bool compact);
 
 bool accelPresent();
 
+// Consume-once crash candidate: true when an impact reached
+// TRACKER_CRASH_THRESHOLD_G since the last call, with the peak g. The main
+// loop uses this to post immediately instead of waiting out the cadence.
+bool accelTakeCrashEvent(float* peakG);
+
 // Future: arm INT1 (GPIO 34) as an ext0 wakeup source before deep sleep so a
 // parked tracker can sleep hard and still catch a tow/impact. Deliberately a
 // stub in v1 — deep sleep isn't part of the current power design.

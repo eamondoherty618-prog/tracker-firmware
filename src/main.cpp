@@ -74,6 +74,7 @@ uint16_t g_forcedReconnects = 0;      // times GPRS was torn down after repeated
 uint32_t g_bootCount = 0;             // persisted across reboots (NVS) — detects brownout/crash resets
 uint32_t lastSpeedSampleMs = 0;
 float lastSpeedKph = NAN;
+float g_crashReportG = 0;  // crash candidate peak awaiting inclusion in the next payload
 bool gpsEnabled = false;
 bool gprsConnected = false;
 uint32_t lastNetworkWaitMs = 0;
@@ -1878,6 +1879,17 @@ String buildTelemetry(bool compact = false) {
   canObd2AppendTelemetry(doc, compact);
   accelAppendTelemetry(doc, compact);
 
+  // Crash candidate (impact ≥ TRACKER_CRASH_THRESHOLD_G): tagged as an event
+  // so the server escalates — push + SMS with location — instead of just
+  // storing a row. speed_kph is the last GPS speed before the hit; the obd
+  // section in the same payload carries the wheel-speed side of the story.
+  if (g_crashReportG > 0) {
+    doc["event"] = "impact_crash";
+    JsonObject cr = doc["crash"].to<JsonObject>();
+    cr["peak_g"] = serialized(String(g_crashReportG, 1));
+    if (!isnan(lastSpeedKph)) cr["speed_kph"] = serialized(String(lastSpeedKph, 1));
+  }
+
   String body;
   serializeJson(doc, body);
   return body;
@@ -2507,6 +2519,21 @@ void loop() {
     }
   }
 
+  // Instant-event path: a crash candidate or a fresh trouble code posts NOW —
+  // event → phone in seconds, not at the next cadence tick.
+  float crashG = 0;
+  if (accelTakeCrashEvent(&crashG)) {
+    Serial.printf("ACCEL: crash candidate %.1f g — posting immediately\n", crashG);
+    g_crashReportG = crashG;
+    lastTelemetryMs = 0;
+  }
+  bool instantEvent = g_crashReportG > 0;
+  if (canObd2TakeNewDtcEvent()) {
+    Serial.println("OBD2: DTC set changed — posting immediately");
+    instantEvent = true;
+    lastTelemetryMs = 0;
+  }
+
   // While posts are failing, retry fast — don't wait out a long parked-heartbeat
   // interval. When healthy, use the normal adaptive interval.
   const uint32_t interval = (g_consecutivePostFails > 0) ? 15000UL : nextIntervalMs();
@@ -2516,16 +2543,18 @@ void loop() {
     // UDP builds send the compact payload (508-byte datagram limit); the full payload
     // still goes out with every HTTPS heartbeat inside postTelemetry().
     const String payload = buildTelemetry(TRACKER_USE_NCE_UDP != 0);
+    g_crashReportG = 0;  // baked into `payload` now; a failed post keeps it via the queue
 
     // A parked↔moving change is the report the map can't afford to lose —
-    // route it over reliable HTTPS instead of fire-and-forget UDP.
+    // route it over reliable HTTPS instead of fire-and-forget UDP. Crash and
+    // fresh-DTC events even more so.
     static char lastSentMotion[12] = "";
     const bool motionChanged =
         lastSentMotion[0] != '\0' && strcmp(lastSentMotion, g_lastBuiltMotion) != 0;
 
     Serial.println(payload);
     CRUMB("postJson");
-    const bool posted = postTelemetry(payload, motionChanged);
+    const bool posted = postTelemetry(payload, motionChanged || instantEvent);
     if (posted) strlcpy(lastSentMotion, g_lastBuiltMotion, sizeof(lastSentMotion));
     if (!posted) {
       Serial.println("Queueing telemetry");

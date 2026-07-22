@@ -22,6 +22,7 @@ constexpr size_t MAX_EVENTS = 5;
 ImpactEvent g_events[MAX_EVENTS];
 size_t g_eventCount = 0;
 float g_sessionPeakG = 0;
+float g_crashPendingG = 0;  // ≥ TRACKER_CRASH_THRESHOLD_G peak awaiting pickup by the loop
 portMUX_TYPE g_mux = portMUX_INITIALIZER_UNLOCKED;
 
 bool writeReg(uint8_t reg, uint8_t val) {
@@ -48,6 +49,7 @@ void recordEvent(uint32_t atMs, float peakG) {
   }
   g_events[g_eventCount++] = { atMs, peakG };
   if (peakG > g_sessionPeakG) g_sessionPeakG = peakG;
+  if (peakG >= TRACKER_CRASH_THRESHOLD_G && peakG > g_crashPendingG) g_crashPendingG = peakG;
   portEXIT_CRITICAL(&g_mux);
 }
 
@@ -151,6 +153,16 @@ void accelInit() {
 }
 
 bool accelPresent() { return g_present; }
+
+bool accelTakeCrashEvent(float* peakG) {
+  portENTER_CRITICAL(&g_mux);
+  const float g = g_crashPendingG;
+  g_crashPendingG = 0;
+  portEXIT_CRITICAL(&g_mux);
+  if (g <= 0) return false;
+  if (peakG) *peakG = g;
+  return true;
+}
 
 void accelConfigureWakeOnInt1() {
   // v1 stub. Future: map ACTIVITY interrupt to INT1 (0x2E/0x2F), then

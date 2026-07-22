@@ -36,3 +36,8 @@ bool canObd2Present();
 // floor). This is a real engine-on signal — unlike GPS motion — so the main
 // loop uses it to keep posting fast while idling, not just while moving.
 bool canObd2EngineRunning();
+
+// Consume-once: true when the stored-DTC set changed since the previous read
+// this boot. Drives the instant-post path so a fresh check-engine code reaches
+// the server in seconds instead of at the next cadence tick.
+bool canObd2TakeNewDtcEvent();

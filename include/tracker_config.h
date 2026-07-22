@@ -23,7 +23,7 @@
 #ifndef TRACKER_API_KEY
 #define TRACKER_API_KEY "c5cc56a23546eb487223fe810ae8a8b76d83376ee09140f7"
 #endif
-#define TRACKER_FIRMWARE_VERSION "0.11.5"
+#define TRACKER_FIRMWARE_VERSION "0.11.6"
 
 // VESTIGIAL: alternator-voltage ignition detection. This hardware uses a 12V→5V buck
 // with no voltage sense, and AT+CBC only reads the buffer LiPo (~3.8V), so these can
@@ -119,6 +119,11 @@
 #define TRACKER_ACCEL_INT1_GPIO 34
 #define TRACKER_IMPACT_THRESHOLD_G 6.0f  // dynamic g (gravity removed) that counts as an impact
 #define TRACKER_IMPACT_DEBOUNCE_MS 2000UL
+// At/above this peak the impact is treated as a crash candidate: the main loop
+// posts immediately over reliable HTTPS and the server escalates (push + SMS).
+// 6-12 g = pothole/door-slam territory; a real collision on a chassis mount
+// reads well above this. Severity grading happens server-side from the peak.
+#define TRACKER_CRASH_THRESHOLD_G 12.0f
 
 // Bench verification: 1 = dump raw CAN frames + live accel readings to serial.
 // Build with the bench_debug pio env rather than editing this.

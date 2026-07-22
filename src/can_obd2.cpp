@@ -45,6 +45,10 @@ constexpr size_t MAX_DTC = 8;
 String g_dtc[MAX_DTC];      size_t g_dtcCount = 0;
 String g_dtcPending[MAX_DTC]; size_t g_dtcPendingCount = 0;
 bool g_dtcEverRead = false;
+// New-code detection for the instant-post path: a stored-DTC set that changed
+// vs the previous read this boot shouldn't wait out the telemetry cadence.
+String g_dtcSig; bool g_dtcSigValid = false;
+bool g_newDtcEvent = false;
 String g_vin;
 bool g_vinRequested = false;
 bool g_clearRequested = false;
@@ -179,7 +183,17 @@ void handleObdPayload(const uint8_t* d, uint16_t len) {
       if (svc == 0x41 && len >= 3 && d[1] == g_opPid) handlePidValue(d[1], d + 2, len - 2);
       break;
     case Op::DTC_STORED:
-      if (svc == 0x43) { parseDtcPayload(d, len, g_dtc, &g_dtcCount); g_dtcEverRead = true; }
+      if (svc == 0x43) {
+        parseDtcPayload(d, len, g_dtc, &g_dtcCount);
+        g_dtcEverRead = true;
+        String sig;
+        for (size_t i = 0; i < g_dtcCount; i++) { sig += g_dtc[i]; sig += ','; }
+        // First read of the boot only baselines; codes already present ride the
+        // next normal post. A set that changes mid-session fires instantly.
+        if (g_dtcSigValid && sig != g_dtcSig && g_dtcCount > 0) g_newDtcEvent = true;
+        g_dtcSig = sig;
+        g_dtcSigValid = true;
+      }
       break;
     case Op::DTC_PENDING:
       if (svc == 0x47) parseDtcPayload(d, len, g_dtcPending, &g_dtcPendingCount);
@@ -199,6 +213,7 @@ void handleObdPayload(const uint8_t* d, uint16_t len) {
       if (svc == 0x44) {
         g_dtcCount = 0;
         g_dtcPendingCount = 0;
+        g_dtcSig = "";
         g_clearedFlag = true;
         Serial.println("OBD2: stored DTCs cleared (server-commanded)");
       }
@@ -401,6 +416,12 @@ void canObd2RequestClearDtc() {
 }
 
 bool canObd2Present() { return g_state == BusState::READY; }
+
+bool canObd2TakeNewDtcEvent() {
+  const bool e = g_newDtcEvent;
+  g_newDtcEvent = false;
+  return e;
+}
 
 bool canObd2EngineRunning() {
   // Fresh RPM (0x0C) reading above the idle floor = engine on.
