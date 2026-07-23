@@ -41,3 +41,7 @@ bool canObd2EngineRunning();
 // this boot. Drives the instant-post path so a fresh check-engine code reaches
 // the server in seconds instead of at the next cadence tick.
 bool canObd2TakeNewDtcEvent();
+
+// Heartbeat size guard: skip the bus-survey section in the NEXT full payload
+// build (the modem's POST body cap is ~1 KB; oversized bodies can never send).
+void canObd2SuppressSurveyOnce();

@@ -131,7 +131,13 @@ uint32_t g_udpFailStreak = 0;
 long g_lastServerUdpAgeS = -2;
 uint32_t g_udpDisabledUntilMs = 0;
 const char* g_resetReason = ""; // why the board last reset (sw/panic/brownout/poweron)
-#define CRUMB(s) do { strncpy(g_breadcrumb, (s), sizeof(g_breadcrumb) - 1); g_breadcrumb[sizeof(g_breadcrumb) - 1] = 0; } while (0)
+// Breadcrumb + watchdog feed: every stage marker also feeds the loop watchdog,
+// so legitimately-long sequential stages (setup's modem bring-up, slow cell
+// attach after a crash reboot) don't trip the 180s ISR — while a genuinely
+// hung stage stops dropping crumbs and still gets reset. Field bug: the
+// watchdog armed at the top of setup() with no feed until loop() turned every
+// slow attach into a reboot CHAIN, multiplying boot_count.
+#define CRUMB(s) do { strncpy(g_breadcrumb, (s), sizeof(g_breadcrumb) - 1); g_breadcrumb[sizeof(g_breadcrumb) - 1] = 0; g_loopBeat++; } while (0)
 
 void powerOnModem() {
   pinMode(MODEM_PWRKEY, OUTPUT);
@@ -1757,6 +1763,13 @@ String buildTelemetry(bool compact = false) {
   doc["battery_mv"] = batteryMv;
   doc["queued_messages"] = queueCount;
   doc["boot_count"] = g_bootCount;  // cheap + tracks brownout resets — kept even compact
+  // Crash forensics ride EVERY payload (not just the 15-min HTTPS heartbeat):
+  // a crash-looping board reboots faster than the heartbeat interval, so the
+  // full-payload-only diagnostics never made it out during the one field
+  // incident that needed them (boot 50→170 with zero reset_reason reports).
+  doc["reset_reason"] = g_resetReason;
+  if (g_lastHangOp[0]) doc["last_hang_op"] = g_lastHangOp;
+  doc["uptime_s"] = nowMs / 1000;   // short uptimes at post time = reboot storm
 #if TRACKER_USE_NCE_UDP
   // UDP health diagnostics — visible in the app's device.raw without a serial
   // cable. fail_streak >0 = local CAOPEN/CASEND failures (DNS/session);
@@ -1989,10 +2002,29 @@ bool postUdp1nce(const String& body) {
 bool postTelemetry(const String& body, bool forceReliable = false) {
 #if TRACKER_USE_NCE_UDP
   static uint32_t lastHeartbeatMs = 0;
+  static uint32_t lastHbAttemptMs = 0;
   const uint32_t now = millis();
-  if (lastHeartbeatMs == 0 || now - lastHeartbeatMs >= TRACKER_NCE_HTTPS_HEARTBEAT_MS) {
+  // Failed heartbeats retry at most every 2 min — NOT on every post. The
+  // field crash-loop: an oversized heartbeat body was rejected by the modem
+  // forever, and per-post retries (each stalling seconds in AT waits) starved
+  // the 180s loop watchdog → reboot every few minutes for a day.
+  if ((lastHeartbeatMs == 0 || now - lastHeartbeatMs >= TRACKER_NCE_HTTPS_HEARTBEAT_MS) &&
+      (lastHbAttemptMs == 0 || now - lastHbAttemptMs >= 120000UL)) {
+    lastHbAttemptMs = now;
     Serial.println("NCE: HTTPS heartbeat (full payload)");
-    if (postJson(buildTelemetry(false))) {
+    // The modem's SHBOD body limit is 1024 bytes. The v0.11.7 survey pushed
+    // full payloads past it — every heartbeat died at "body not accepted"
+    // and no full payload (VIN/diagnostics) reached the server for a day.
+    // Oversized → rebuild without the survey section; survey rides whichever
+    // heartbeats have room.
+    String full = buildTelemetry(false);
+    if (full.length() > 1000) {
+      Serial.printf("HB body %u B > 1000 — rebuilding without bus survey\n",
+                    (unsigned)full.length());
+      canObd2SuppressSurveyOnce();
+      full = buildTelemetry(false);
+    }
+    if (postJson(full)) {
       lastHeartbeatMs = now;
       // Blackhole detector: we sent plenty of datagrams since the last
       // heartbeat, yet the server's response says none have arrived recently

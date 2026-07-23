@@ -49,6 +49,13 @@ bool g_dtcEverRead = false;
 // vs the previous read this boot shouldn't wait out the telemetry cadence.
 String g_dtcSig; bool g_dtcSigValid = false;
 bool g_newDtcEvent = false;
+// DTC collection windows: responses from every ECU merge into staging until
+// the op deadline, then swap into the live lists in one deterministic step.
+String g_dtcStage[MAX_DTC];     size_t g_dtcStageCount = 0;     bool g_dtcWindowGot = false;
+String g_dtcPendStage[MAX_DTC]; size_t g_dtcPendStageCount = 0; bool g_dtcPendWindowGot = false;
+uint32_t g_lastRxMs = 0;        // last frame heard in READY — silence demotes
+uint8_t g_vinTries = 0;         // VIN retry budget per boot
+bool g_surveySkipOnce = false;  // heartbeat builder: drop survey when body > budget
 String g_vin;
 uint32_t g_vinNextMs = 0;   // next VIN request time; retries until captured
 bool g_clearRequested = false;
@@ -85,6 +92,12 @@ bool sendFrame(uint32_t id, const uint8_t* data, uint8_t len) {
   twai_message_t msg = {};
   msg.identifier = id;
   msg.extd = g_extended ? 1 : 0;
+  // Single-shot: NO hardware retransmission. On a sleeping bus an un-ACKed
+  // frame parks the controller at error-passive (bus-off is unreachable) and
+  // the TWAI peripheral retransmits it forever — jamming the vehicle's OBD
+  // bus all night. Request/response already has op-level timeouts; a lost
+  // request is simply retried by the next poll.
+  msg.ss = 1;
   msg.data_length_code = 8;                        // ISO 15765-4: pad to 8
   memset(msg.data, 0x00, 8);
   memcpy(msg.data, data, len);
@@ -175,38 +188,51 @@ void handlePidValue(uint8_t pid, const uint8_t* ab, uint16_t len) {
 }
 
 // A fully reassembled (or single-frame) OBD payload for the in-flight op.
+// Union one responder's codes into a staging set (dedup, capped). DTC ops
+// collect from ALL ECUs until the op deadline — first-responder-wins made the
+// visible set oscillate ECM/TCM and spam instant posts.
+void mergeDtcPayload(const uint8_t* d, uint16_t len, String* out, size_t* outCount) {
+  String tmp[MAX_DTC]; size_t n = 0;
+  parseDtcPayload(d, len, tmp, &n);
+  for (size_t i = 0; i < n && *outCount < MAX_DTC; i++) {
+    bool dup = false;
+    for (size_t j = 0; j < *outCount; j++) if (out[j] == tmp[i]) { dup = true; break; }
+    if (!dup) out[(*outCount)++] = tmp[i];
+  }
+}
+
 void handleObdPayload(const uint8_t* d, uint16_t len) {
   if (len < 1) return;
   const uint8_t svc = d[0];
+  // Cross-ECU discipline: a broadcast (0x7DF) request is answered by EVERY
+  // emissions ECU. Only a payload that MATCHES the in-flight op may consume
+  // it — a TCM's 0x7F negative response must not cancel the ECM's multi-frame
+  // VIN mid-reassembly (field bug: the truck's VIN could NEVER be captured
+  // because unconditional g_op=NONE ran on the first stray reply). Unmatched
+  // payloads are ignored; the op deadline handles true timeouts.
+  bool done = false;
   switch (g_op) {
     case Op::PROBE:
       if (svc == 0x41) {
         g_state = BusState::READY;
+        g_lastRxMs = millis();
         g_probeAttempts = 0;
         Serial.print("OBD2: bus detected (");
         Serial.print(g_extended ? "29" : "11");
         Serial.println("-bit)");
         if (len >= 4) handlePidValue(d[1], d + 2, len - 2);
+        done = true;
       }
       break;
     case Op::PID:
-      if (svc == 0x41 && len >= 3 && d[1] == g_opPid) handlePidValue(d[1], d + 2, len - 2);
+      if (svc == 0x41 && len >= 3 && d[1] == g_opPid) { handlePidValue(d[1], d + 2, len - 2); done = true; }
       break;
     case Op::DTC_STORED:
-      if (svc == 0x43) {
-        parseDtcPayload(d, len, g_dtc, &g_dtcCount);
-        g_dtcEverRead = true;
-        String sig;
-        for (size_t i = 0; i < g_dtcCount; i++) { sig += g_dtc[i]; sig += ','; }
-        // First read of the boot only baselines; codes already present ride the
-        // next normal post. A set that changes mid-session fires instantly.
-        if (g_dtcSigValid && sig != g_dtcSig && g_dtcCount > 0) g_newDtcEvent = true;
-        g_dtcSig = sig;
-        g_dtcSigValid = true;
-      }
+      // Collect-until-deadline: merge into staging; finalize in canObd2Service.
+      if (svc == 0x43) { mergeDtcPayload(d, len, g_dtcStage, &g_dtcStageCount); g_dtcWindowGot = true; }
       break;
     case Op::DTC_PENDING:
-      if (svc == 0x47) parseDtcPayload(d, len, g_dtcPending, &g_dtcPendingCount);
+      if (svc == 0x47) { mergeDtcPayload(d, len, g_dtcPendStage, &g_dtcPendStageCount); g_dtcPendWindowGot = true; }
       break;
     case Op::VIN:
       // [0x49, 0x02, 0x01, 17 VIN chars]
@@ -216,7 +242,7 @@ void handleObdPayload(const uint8_t* d, uint16_t len) {
           const char c = (char)d[i];
           if (c >= '0' && c <= 'Z') vin += c;
         }
-        if (vin.length() == 17) { g_vin = vin; Serial.print("OBD2: VIN "); Serial.println(g_vin); }
+        if (vin.length() == 17) { g_vin = vin; Serial.print("OBD2: VIN "); Serial.println(g_vin); done = true; }
       }
       break;
     case Op::CLEAR:
@@ -226,11 +252,12 @@ void handleObdPayload(const uint8_t* d, uint16_t len) {
         g_dtcSig = "";
         g_clearedFlag = true;
         Serial.println("OBD2: stored DTCs cleared (server-commanded)");
+        done = true;
       }
       break;
     default: break;
   }
-  g_op = Op::NONE;
+  if (done) g_op = Op::NONE;
 }
 
 void handleFrame(const twai_message_t& msg) {
@@ -247,6 +274,9 @@ void handleFrame(const twai_message_t& msg) {
     const uint8_t len = d[0] & 0xF;
     if (len >= 1 && len <= 7) handleObdPayload(d + 1, len);
   } else if (pci == 0x1) {                            // first frame → flow control
+    // First FF wins: a second ECU's multi-frame answer must not clobber an
+    // in-progress reassembly (cross-ECU broadcast responses).
+    if (g_isotp.active && msg.identifier != g_isotp.respId) return;
     g_isotp.active = true;
     g_isotp.respId = msg.identifier;
     g_isotp.expected = ((d[0] & 0xF) << 8) | d[1];
@@ -477,7 +507,7 @@ void canObd2Service(bool vehicleActive) {
   // Drain everything the controller has for us — cheap, no blocking.
   if (g_state == BusState::PROBING || g_state == BusState::READY) {
     twai_message_t msg;
-    while (twai_receive(&msg, 0) == ESP_OK) { surveyFrame(msg); handleFrame(msg); }
+    while (twai_receive(&msg, 0) == ESP_OK) { g_lastRxMs = now; surveyFrame(msg); handleFrame(msg); }
 
     // A wedged controller (no transceiver → no ACKs → bus-off) reads as absent.
     twai_status_info_t st;
@@ -566,10 +596,41 @@ void canObd2Service(bool vehicleActive) {
       break;
   }
 
+  // Bus silent 60s in READY (engine off → ECUs asleep): stand down to the
+  // passive re-probe instead of transmitting at a dead bus. (With ss=1 frames
+  // aren't hardware-retried, but polling a sleeping bus is still pointless
+  // chatter and delays detecting the next engine start cleanly.)
+  if (g_lastRxMs != 0 && now - g_lastRxMs > 60000UL) {
+    Serial.println("OBD2: bus silent 60s — standing down to passive re-probe");
+    twai_clear_transmit_queue();
+    teardownDriver();
+    g_state = BusState::ABSENT;
+    g_lastRxMs = 0;
+    g_nextProbeMs = now + TRACKER_OBD_REPROBE_MS;
+    return;
+  }
+
   // READY: one in-flight request at a time, next step chosen by priority.
   if (g_op != Op::NONE) {
     if ((int32_t)(now - g_opDeadlineMs) < 0) return;   // still waiting
-    g_op = Op::NONE;                                    // timed out — move on
+    // Op window closed. DTC ops COLLECT until this deadline (multi-ECU
+    // union) and finalize here in one deterministic step.
+    if (g_op == Op::DTC_STORED && g_dtcWindowGot) {
+      for (size_t i = 0; i < g_dtcStageCount; i++) g_dtc[i] = g_dtcStage[i];
+      g_dtcCount = g_dtcStageCount;
+      g_dtcEverRead = true;
+      String sig;
+      for (size_t i = 0; i < g_dtcCount; i++) { sig += g_dtc[i]; sig += ','; }
+      // First read of the boot only baselines; codes already present ride the
+      // next normal post. A set that changes mid-session fires instantly.
+      if (g_dtcSigValid && sig != g_dtcSig && g_dtcCount > 0) g_newDtcEvent = true;
+      g_dtcSig = sig;
+      g_dtcSigValid = true;
+    } else if (g_op == Op::DTC_PENDING && g_dtcPendWindowGot) {
+      for (size_t i = 0; i < g_dtcPendStageCount; i++) g_dtcPending[i] = g_dtcPendStage[i];
+      g_dtcPendingCount = g_dtcPendStageCount;
+    }
+    g_op = Op::NONE;
   }
 
   if (g_clearRequested) {
@@ -582,7 +643,9 @@ void canObd2Service(bool vehicleActive) {
   // and lost its chance whenever the bus wasn't ready at that moment (field
   // bug: truck ran for days with no VIN bound). Re-ask every 2 min until the
   // 17 chars land; after that, never again this boot.
-  if (g_vin.length() != 17 && (g_vinNextMs == 0 || (int32_t)(now - g_vinNextMs) >= 0)) {
+  if (g_vin.length() != 17 && g_vinTries < 10 &&
+      (g_vinNextMs == 0 || (int32_t)(now - g_vinNextMs) >= 0)) {
+    g_vinTries++;   // bounded per boot — a truck that won't answer isn't asked forever
     g_vinNextMs = now + 2 * 60 * 1000UL;
     beginOp(Op::VIN, 0, 800);
     startRequestForOp(Op::VIN, 0);
@@ -594,6 +657,9 @@ void canObd2Service(bool vehicleActive) {
     g_lastDtcPollMs = now;
     const Op op = pendingTurn ? Op::DTC_PENDING : Op::DTC_STORED;
     pendingTurn = !pendingTurn;
+    // fresh collection window — every responder unions in until the deadline
+    if (op == Op::DTC_STORED) { g_dtcStageCount = 0; g_dtcWindowGot = false; }
+    else { g_dtcPendStageCount = 0; g_dtcPendWindowGot = false; }
     beginOp(op, 0, 800);
     startRequestForOp(op, 0);
     return;
@@ -645,13 +711,16 @@ void canObd2AppendTelemetry(JsonDocument& doc, bool compact) {
     obd["listen_frames"] = g_listenFrames;  // passive session: bus heard, not spoken to
   }
 
-  // Bus survey: rotating window of 10 entries per post ("id:count:hexbytes"),
-  // sweeping the whole table across consecutive posts — the full payload must
-  // stay under the modem's ~1 KB SHBOD body cap, so never ship all 48 at once.
-  if (g_surveyCount > 0) {
+  // Bus survey: rotating window of 6 entries per post ("id:count:hexbytes"),
+  // sweeping the whole table across consecutive posts. SIZE MATTERS: the
+  // modem's SHBOD body cap is 1024 B and the 10-entry window pushed full
+  // payloads past it — every heartbeat died for a day (the 0.11.7 crash-loop
+  // incident). 6 entries ≈ 180 B; the heartbeat builder also drops the whole
+  // section (suppress-once) if the body still lands over budget.
+  if (g_surveyCount > 0 && !g_surveySkipOnce) {
     JsonArray sv = obd["can_ids"].to<JsonArray>();
     static size_t cursor = 0;
-    const size_t n = g_surveyCount < 10 ? g_surveyCount : 10;
+    const size_t n = g_surveyCount < 6 ? g_surveyCount : 6;
     for (size_t k = 0; k < n; k++) {
       const SurveyEntry& e = g_survey[(cursor + k) % g_surveyCount];
       char hex[17];
@@ -689,4 +758,7 @@ void canObd2AppendTelemetry(JsonDocument& doc, bool compact) {
     for (size_t i = 0; i < g_dtcPendingCount; i++) pend.add(g_dtcPending[i]);
   }
   if (g_clearedFlag) { obd["dtc_cleared"] = true; g_clearedFlag = false; }
+  g_surveySkipOnce = false;   // one full build only
 }
+
+void canObd2SuppressSurveyOnce() { g_surveySkipOnce = true; }
