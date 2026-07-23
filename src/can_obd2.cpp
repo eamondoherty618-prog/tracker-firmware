@@ -148,6 +148,16 @@ void parseDtcPayload(const uint8_t* d, uint16_t len, String* out, size_t* outCou
 }
 
 void handlePidValue(uint8_t pid, const uint8_t* ab, uint16_t len) {
+  // Key-off placeholder filter: as the bus winds down the ECU answers with
+  // 0xFF-filled data ("no value") for a moment. Decoded blindly that's
+  // 255 km/h and 100% throttle frozen on the app's vitals card. All-FF is
+  // never a legitimate reading for the PIDs we poll — drop the response.
+  bool allFF = len > 0;
+  for (uint16_t i = 0; i < len; i++) {
+    if (ab[i] != 0xFF) { allFF = false; break; }
+  }
+  if (allFF) return;
+
   float v = NAN;
   switch (pid) {
     case 0x0C: if (len >= 2) v = ((ab[0] << 8) | ab[1]) / 4.0f; break;  // RPM
