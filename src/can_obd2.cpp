@@ -50,7 +50,7 @@ bool g_dtcEverRead = false;
 String g_dtcSig; bool g_dtcSigValid = false;
 bool g_newDtcEvent = false;
 String g_vin;
-bool g_vinRequested = false;
+uint32_t g_vinNextMs = 0;   // next VIN request time; retries until captured
 bool g_clearRequested = false;
 bool g_clearedFlag = false;       // reported once in the next full payload
 
@@ -578,8 +578,12 @@ void canObd2Service(bool vehicleActive) {
     startRequestForOp(Op::CLEAR, 0);
     return;
   }
-  if (!g_vinRequested) {
-    g_vinRequested = true;
+  // VIN: retry until actually captured — the old one-shot fired once per boot
+  // and lost its chance whenever the bus wasn't ready at that moment (field
+  // bug: truck ran for days with no VIN bound). Re-ask every 2 min until the
+  // 17 chars land; after that, never again this boot.
+  if (g_vin.length() != 17 && (g_vinNextMs == 0 || (int32_t)(now - g_vinNextMs) >= 0)) {
+    g_vinNextMs = now + 2 * 60 * 1000UL;
     beginOp(Op::VIN, 0, 800);
     startRequestForOp(Op::VIN, 0);
     return;
