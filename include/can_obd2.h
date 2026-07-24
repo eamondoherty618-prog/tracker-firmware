@@ -45,3 +45,8 @@ bool canObd2TakeNewDtcEvent();
 // Heartbeat size guard: skip the bus-survey section in the NEXT full payload
 // build (the modem's POST body cap is ~1 KB; oversized bodies can never send).
 void canObd2SuppressSurveyOnce();
+
+// Consume-once: crank-sag minimum control-module voltage (PID 0x42) captured
+// over the 5s window after the last engine start, or NAN if none pending.
+// Trended server-side to flag a battery about to die.
+float canObd2TakeCrankVMin();

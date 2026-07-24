@@ -56,6 +56,12 @@ String g_dtcPendStage[MAX_DTC]; size_t g_dtcPendStageCount = 0; bool g_dtcPendWi
 uint32_t g_lastRxMs = 0;        // last frame heard in READY — silence demotes
 uint8_t g_vinTries = 0;         // VIN retry budget per boot
 bool g_surveySkipOnce = false;  // heartbeat builder: drop survey when body > budget
+// Cold-start crank-voltage capture
+bool g_wasRunning = false;
+bool g_crankCapture = false;
+uint32_t g_crankCaptureEndMs = 0;
+float g_crankVMin = NAN;         // min seen during the active capture window
+float g_crankVReport = NAN;      // latched result awaiting one telemetry post
 String g_vin;
 uint32_t g_vinNextMs = 0;   // next VIN request time; retries until captured
 bool g_clearRequested = false;
@@ -184,6 +190,16 @@ void handlePidValue(uint8_t pid, const uint8_t* ab, uint16_t len) {
   }
   for (size_t i = 0; i < kPidCount; i++) {
     if (kPids[i] == pid && !isnan(v)) { g_pidValue[i] = v; g_pidMs[i] = millis(); }
+  }
+
+  // Cold-start forensics: capture the LOWEST control-module voltage (PID 0x42)
+  // during the engine-start window — the crank/alternator-ramp sag. Trended
+  // server-side over weeks, a deepening sag calls a dying battery BEFORE it
+  // strands the truck. (True hardware note: this is the sag the tracker can
+  // see once it's polling — the deepest starter-motor dip may pre-date the
+  // first poll, but the trend of what we DO catch is what matters.)
+  if (pid == 0x42 && g_crankCapture && !isnan(v) && v > 6.0f) {
+    if (isnan(g_crankVMin) || v < g_crankVMin) g_crankVMin = v;
   }
 }
 
@@ -664,6 +680,29 @@ void canObd2Service(bool vehicleActive) {
     startRequestForOp(op, 0);
     return;
   }
+  // Cold-start capture: the instant the engine transitions to running (rpm
+  // crosses the idle floor for the first time this bus session), open a 5s
+  // window that polls ONLY voltage (0x42) fast, so handlePidValue can record
+  // the crank/ramp sag minimum. One capture per engine start.
+  const bool running = canObd2EngineRunning();
+  if (running && !g_wasRunning) {
+    g_crankCapture = true;
+    g_crankCaptureEndMs = now + 5000UL;
+    g_crankVMin = NAN;
+  }
+  g_wasRunning = running;
+  if (g_crankCapture) {
+    if ((int32_t)(now - g_crankCaptureEndMs) >= 0) {
+      g_crankCapture = false;
+      if (!isnan(g_crankVMin)) g_crankVReport = g_crankVMin;  // latch for one post
+    } else if (g_op == Op::NONE && now - g_lastPollMs >= 120UL) {
+      g_lastPollMs = now;
+      beginOp(Op::PID, 0x42, 200);
+      startRequestForOp(Op::PID, 0x42);
+      return;
+    }
+  }
+
   // PIDs poll on every READY bus, not just on trips: parked-with-engine-on is
   // exactly the idling state the fleet features bill by, and trip detection is
   // GPS-motion-based so it can never see it. Parked polls run at a relaxed
@@ -677,6 +716,14 @@ void canObd2Service(bool vehicleActive) {
     beginOp(Op::PID, pid, 300);
     startRequestForOp(Op::PID, pid);
   }
+}
+
+// Consume-once: the crank-sag minimum voltage from the last engine start, or
+// NAN if none captured since the last read. Rides one telemetry post.
+float canObd2TakeCrankVMin() {
+  const float v = g_crankVReport;
+  g_crankVReport = NAN;
+  return v;
 }
 
 void canObd2AppendTelemetry(JsonDocument& doc, bool compact) {

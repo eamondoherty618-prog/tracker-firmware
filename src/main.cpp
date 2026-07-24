@@ -75,6 +75,7 @@ uint32_t g_bootCount = 0;             // persisted across reboots (NVS) — dete
 uint32_t lastSpeedSampleMs = 0;
 float lastSpeedKph = NAN;
 float g_crashReportG = 0;  // crash candidate peak awaiting inclusion in the next payload
+uint32_t g_fastStreamUntilMs = 0;  // mechanic mode: 1s posting until this deadline
 bool gpsEnabled = false;
 bool gprsConnected = false;
 uint32_t lastNetworkWaitMs = 0;
@@ -1304,6 +1305,18 @@ void handleTelemetryResponse(const String& respBodyIn) {
     canObd2RequestClearDtc();
   }
 
+  // Mechanic mode: the server can request a burst of fast (1s) posting for a
+  // bounded window so the app's live gauges move like a real scan tool. The
+  // response carries the seconds remaining; we hold a local deadline so the
+  // stream survives between posts and self-expires.
+  if (!respDoc["fast_stream_s"].isNull()) {
+    const long secs = respDoc["fast_stream_s"].as<long>();
+    if (secs > 0) {
+      g_fastStreamUntilMs = millis() + (uint32_t)min(secs, 1800L) * 1000UL;
+      Serial.printf("Mechanic mode: fast streaming for %lds\n", secs);
+    }
+  }
+
   const char* otaVer = respDoc["ota"]["version"] | "";
   const int otaSize = respDoc["ota"]["size"] | 0;
   const char* otaMd5 = respDoc["ota"]["md5"] | "";
@@ -1903,6 +1916,11 @@ String buildTelemetry(bool compact = false) {
     if (!isnan(lastSpeedKph)) cr["speed_kph"] = serialized(String(lastSpeedKph, 1));
   }
 
+  // Cold-start crank-sag minimum (once per engine start) — the server trends
+  // it to predict battery death. Consume-once so it rides exactly one post.
+  const float crankV = canObd2TakeCrankVMin();
+  if (!isnan(crankV)) doc["crank_v_min"] = serialized(String(crankV, 2));
+
   String body;
   serializeJson(doc, body);
   return body;
@@ -2065,6 +2083,9 @@ bool postTelemetry(const String& body, bool forceReliable = false) {
 }
 
 uint32_t nextIntervalMs() {
+  // Mechanic mode (server-triggered, bounded): stream at 1s so the app's
+  // gauges move like a live scan tool. Highest priority while active.
+  if ((int32_t)(g_fastStreamUntilMs - millis()) > 0) return 1000UL;
   // OBD gives a TRUE engine-on signal (rpm), unlike GPS motion. When the engine
   // is running — idling or driving — keep the live dash fresh at the OBD-active
   // cadence. Bounded to real engine-on time, and cheap over UDP.
