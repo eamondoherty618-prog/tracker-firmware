@@ -23,7 +23,7 @@
 #ifndef TRACKER_API_KEY
 #define TRACKER_API_KEY "c5cc56a23546eb487223fe810ae8a8b76d83376ee09140f7"
 #endif
-#define TRACKER_FIRMWARE_VERSION "0.11.11"
+#define TRACKER_FIRMWARE_VERSION "0.11.12"
 
 // VESTIGIAL: alternator-voltage ignition detection. This hardware uses a 12V→5V buck
 // with no voltage sense, and AT+CBC only reads the buffer LiPo (~3.8V), so these can
@@ -46,9 +46,13 @@
 // normalised by the actual sample gap) and also require a minimum absolute change
 // so one noisy GPS sample can't trip it. NOTE: with GPS speed only sampled every
 // ~10 s these are still coarse; true harshness needs an IMU or high-rate sampling.
-#define TRACKER_HARD_BRAKE_RATE_KPH_S  -4.0f    // <= this rate (kph/s) = hard brake
-#define TRACKER_RAPID_ACCEL_RATE_KPH_S  5.0f    // >= this rate (kph/s) = rapid accel
-#define TRACKER_EVENT_MIN_DELTA_KPH     12.0f   // ignore speed changes smaller than this
+// Thresholds are calibrated to industry telematics defaults (Geotab passenger:
+// -9.13 kph/s brake, 8.05 kph/s accel ≈ 0.25g). The old -4.0/5.0 (≈0.11g) was
+// hair-trigger: ordinary firm braking at a yellow light scored as "harsh" and
+// buried the scorecard in noise.
+#define TRACKER_HARD_BRAKE_RATE_KPH_S  -9.0f    // <= this rate (kph/s) = hard brake (~0.25g)
+#define TRACKER_RAPID_ACCEL_RATE_KPH_S  8.0f    // >= this rate (kph/s) = rapid accel (~0.23g)
+#define TRACKER_EVENT_MIN_DELTA_KPH     15.0f   // ignore speed changes smaller than this
 #define TRACKER_EVENT_MIN_DT_MS         2000UL  // gaps shorter than this = GPS jitter
 #define TRACKER_EVENT_WINDOW_MS         12000UL // gaps longer than this aren't one event
 // TLS connect timeout (seconds). TinyGSM defaults to 75s with no override, so a wedged
