@@ -128,6 +128,9 @@ char g_lastBuiltMotion[12] = ""; // motion_state of the most recently built tele
 // send failures, the server's report of when a datagram last ARRIVED
 // (udp_age_s; -2 = no report yet), and the HTTPS-only cooldown deadline.
 uint32_t g_udpSentSinceHb = 0;
+// Last time the server CONFIRMED hearing us (any successful HTTPS exchange).
+// UDP can't update this — it's fire-and-forget. 0 = no contact since boot.
+uint32_t g_lastServerContactMs = 0;
 uint32_t g_udpFailStreak = 0;
 long g_lastServerUdpAgeS = -2;
 uint32_t g_udpDisabledUntilMs = 0;
@@ -1532,6 +1535,7 @@ bool postJson(const String& body) {
   if (nativeEnabled) {
     if (postJsonNative(body)) {
       nativeFailStreak = 0;
+      g_lastServerContactMs = millis();
       return true;
     }
     if (++nativeFailStreak >= 3) {
@@ -1543,7 +1547,9 @@ bool postJson(const String& body) {
     sendSimpleAt("+SHDISC", 3000);  // ensure no SH session lingers before raw CAOPEN
   }
 #endif
-  return postJsonRawTls(body);
+  const bool ok = postJsonRawTls(body);
+  if (ok) g_lastServerContactMs = millis();
+  return ok;
 }
 
 // Standalone OTA check via TinyGsmClientSecure GET — independent of telemetry POST response.
@@ -2069,9 +2075,25 @@ bool postTelemetry(const String& body, bool forceReliable = false) {
     Serial.println("NCE: motion transition — reliable HTTPS post");
     if (postJson(body)) return true;
   }
+  // Delivery watchdog (v0.11.13). UDP is fire-and-forget, so a black-holed
+  // 1NCE session looks like success from here: the field failure was the truck
+  // parked overnight, ELEVEN straight 10-min beacons swallowed (UDP unrouted
+  // AND heartbeats failing), zero reboots — the device was certain it was
+  // posting. If the server hasn't CONFIRMED contact in 20 min, stop trusting
+  // UDP: force HTTPS so failures surface, the loop's 15s retry kicks in, and
+  // the escalating recovery (fresh PDP session → modem power-cycle → reboot)
+  // — which is also what re-routes a wedged 1NCE UDP session — actually runs.
+  const uint32_t sinceContact =
+      g_lastServerContactMs != 0 ? now - g_lastServerContactMs : now;
+  const bool contactStale = sinceContact > TRACKER_DELIVERY_STALE_MS;
+  if (contactStale) {
+    Serial.printf("Delivery watchdog: no confirmed contact in %lus — HTTPS only\n",
+                  (unsigned long)(sinceContact / 1000UL));
+  }
+
   // Respect the blackhole cooldown — UDP sends would "succeed" locally and
   // never arrive, so go straight to HTTPS until it expires.
-  const bool udpAllowed = (int32_t)(millis() - g_udpDisabledUntilMs) >= 0;
+  const bool udpAllowed = !contactStale && (int32_t)(millis() - g_udpDisabledUntilMs) >= 0;
   if (udpAllowed && body.length() <= TRACKER_NCE_UDP_MAX_PAYLOAD && postUdp1nce(body)) return true;
   if (forceReliable) return false;  // already tried HTTPS above
   if (udpAllowed) Serial.println("NCE: UDP unavailable — HTTPS fallback for this post");

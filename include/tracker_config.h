@@ -23,7 +23,7 @@
 #ifndef TRACKER_API_KEY
 #define TRACKER_API_KEY "c5cc56a23546eb487223fe810ae8a8b76d83376ee09140f7"
 #endif
-#define TRACKER_FIRMWARE_VERSION "0.11.12"
+#define TRACKER_FIRMWARE_VERSION "0.11.13"
 
 // VESTIGIAL: alternator-voltage ignition detection. This hardware uses a 12V→5V buck
 // with no voltage sense, and AT+CBC only reads the buffer LiPo (~3.8V), so these can
@@ -93,6 +93,11 @@
 // UDP-routed — seen twice in the field), post via HTTPS for this long before
 // retrying UDP.
 #define TRACKER_NCE_UDP_COOLDOWN_MS 3600000UL  // 60 min
+// Delivery watchdog: if no HTTPS-confirmed server contact for this long, treat
+// UDP as black-holed (fire-and-forget can't see it) and force HTTPS so the
+// escalating recovery engages. Must stay under the app's 35-min offline cutoff
+// with margin for the parked 10-min beacon cadence.
+#define TRACKER_DELIVERY_STALE_MS 1200000UL  // 20 min
 
 #define TRACKER_GNSS_WARMUP_MS 45000UL
 #define TRACKER_GNSS_STATUS_LOG_MS 30000UL
