@@ -862,7 +862,13 @@ void maintainGps() {
   const uint32_t nowMs = millis();
   if (lastGnssStatusLogMs == 0 || nowMs - lastGnssStatusLogMs >= TRACKER_GNSS_STATUS_LOG_MS) {
     lastGnssStatusLogMs = nowMs;
+    // getGPSraw() is a serial round-trip to the modem; a wedged modem can make
+    // it slow enough to trip the 180s loop watchdog with the crumb stuck at
+    // "maintainGps" (field hang). Feed the beat around it — this is legitimate
+    // work, not a stall.
+    g_loopBeat++;
     const String raw = modem.getGPSraw();
+    g_loopBeat++;
     Serial.print("GNSS raw: ");
     Serial.println(raw.length() ? raw : "<empty>");
     // enableGPS() can report success while the engine never actually starts (CGNSINF
@@ -884,7 +890,9 @@ void maintainGps() {
 
   // Refresh AGPS every 24h regardless of fix status — keeps satellite predictions fresh.
   if (gprsConnected && (lastAgpsMs == 0 || nowMs - lastAgpsMs >= 86400000UL)) {
+    g_loopBeat++;      // network download can be slow — don't count it against the loop watchdog
     downloadAgps();
+    g_loopBeat++;
   }
 
   // Only recycle GNSS if no fix at all — a marginal fix means the engine is working.
@@ -1532,6 +1540,16 @@ bool postJson(const String& body) {
 #if TRACKER_USE_NATIVE_HTTPS
   static bool nativeEnabled = true;
   static uint8_t nativeFailStreak = 0;
+  static uint32_t nativeDisabledAtMs = 0;
+  // Re-arm the native path 30 min after latching off. A transient modem glitch
+  // (or a stretch of bad signal) used to disable the faster native HTTPS path
+  // until the next reboot — needless raw-TLS burn for hours/days.
+  if (!nativeEnabled && nativeDisabledAtMs != 0 && millis() - nativeDisabledAtMs >= 1800000UL) {
+    Serial.println("Native HTTPS re-arming after 30 min cooldown");
+    nativeEnabled = true;
+    nativeFailStreak = 0;
+    nativeDisabledAtMs = 0;
+  }
   if (nativeEnabled) {
     if (postJsonNative(body)) {
       nativeFailStreak = 0;
@@ -1539,8 +1557,9 @@ bool postJson(const String& body) {
       return true;
     }
     if (++nativeFailStreak >= 3) {
-      Serial.println("Native HTTPS failing repeatedly — latching OFF, using raw TLS");
+      Serial.println("Native HTTPS failing repeatedly — latching OFF for 30 min, using raw TLS");
       nativeEnabled = false;
+      nativeDisabledAtMs = millis();
     } else {
       Serial.println("Native HTTPS failed — falling back to raw TLS for this post");
     }
